@@ -4,12 +4,18 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 import matplotlib.pyplot as plt
+import matplotlib as mpl
 from sklearn.metrics import mean_absolute_error
 from scipy.stats import pearsonr
 import os
 from pathlib import Path
 import warnings
 warnings.filterwarnings('ignore')
+
+# フォント設定（メイリオ）
+plt.rcParams['font.sans-serif'] = ['Meiryo', 'Yu Gothic', 'Hiragino Sans', 'MS Gothic']
+plt.rcParams['axes.unicode_minus'] = False  # マイナス記号の文字化け対策
+mpl.rcParams['font.size'] = 10
 
 # ================================
 # 設定クラス（すべての設定をここで管理）
