@@ -436,6 +436,11 @@ def main():
     
     # 結果の可視化
     plot_cv_results(cv_results)
+
+    # 保存パスの設定
+    save_dir = r"D:\EPSCAN\001"
+    save_path = Path(save_dir)
+    save_path.mkdir(parents=True, exist_ok=True)
     
     # 結果の保存
     with open('cv_results_8fold.pkl', 'wb') as f:
