@@ -55,15 +55,14 @@ def find_optimal_lag(rgb_features, hemo_features, max_lag=1000):
     
     return lag, np.max(np.abs(correlation))
 
-def process_subject(subject_id):
+def process_subject(subject_id, rgb_base_path, hemo_base_path, graph_output_dir):
     """各被験者のデータを処理"""
     print(f"Processing {subject_id}...")
     
     # パス設定
-    rgb_path = f"C:\\Users\\EyeBelow\\{subject_id}\\{subject_id}_downsampled_1Hz.npy"
-    hemo_base_path = f"C:\\Users\\Data signals_bp\\{subject_id}"
-    output_path = f"C:\\Users\\EyeBelow\\{subject_id}\\{subject_id}_downsampled_1Hzver2.npy"
-    graph_output_dir = "C:\\ダウンサンプリング後のRGB信号ver2"
+    rgb_path = os.path.join(rgb_base_path, subject_id, f"{subject_id}_downsampled_1Hz.npy")
+    hemo_subject_path = os.path.join(hemo_base_path, subject_id)
+    output_path = os.path.join(rgb_base_path, subject_id, f"{subject_id}_downsampled_1Hzver2.npy")
     
     # 出力ディレクトリの作成
     os.makedirs(graph_output_dir, exist_ok=True)
@@ -85,7 +84,7 @@ def process_subject(subject_id):
         key_params = ['CO', 'SV', 'HR_CO_SV', 'CI', 'SVI']
         
         for param in key_params:
-            param_path = os.path.join(hemo_base_path, param)
+            param_path = os.path.join(hemo_subject_path, param)
             if not os.path.exists(param_path):
                 continue
             
@@ -207,8 +206,19 @@ def main():
     success_count = 0
     failed_subjects = []
     
+    # ========== パス設定 ==========
+    # RGB信号データのベースパス
+    RGB_BASE_PATH = "C:\\Users\\EyeBelow"
+    
+    # 血行動態データのベースパス  
+    HEMO_BASE_PATH = "C:\\Users\\Data signals_bp"
+    
+    # グラフ出力先ディレクトリ
+    GRAPH_OUTPUT_DIR = "C:\\ダウンサンプリング後のRGB信号ver2"
+    # ========== パス設定終了 ==========
+    
     for subject in subjects:
-        if process_subject(subject):
+        if process_subject(subject, RGB_BASE_PATH, HEMO_BASE_PATH, GRAPH_OUTPUT_DIR):
             success_count += 1
         else:
             failed_subjects.append(subject)
@@ -223,7 +233,7 @@ def main():
         print(f"Failed subjects: {', '.join(failed_subjects)}")
     
     print("\nAll downsampled data saved with suffix '_downsampled_1Hzver2.npy'")
-    print("All graphs saved to 'C:\\ダウンサンプリング後のRGB信号ver2'")
+    print(f"All graphs saved to '{GRAPH_OUTPUT_DIR}'")
 
 if __name__ == "__main__":
     main()
