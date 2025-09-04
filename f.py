@@ -15,11 +15,11 @@ warnings.filterwarnings('ignore')
 
 # フォント設定（メイリオ）
 plt.rcParams['font.sans-serif'] = ['Meiryo', 'Yu Gothic', 'Hiragino Sans', 'MS Gothic']
-plt.rcParams['axes.unicode_minus'] = False  # マイナス記号の文字化け対策
+plt.rcParams['axes.unicode_minus'] = False
 mpl.rcParams['font.size'] = 10
 
 # ================================
-# 設定クラス（すべての設定をここで管理）
+# 設定クラス
 # ================================
 class Config:
     def __init__(self):
@@ -28,37 +28,23 @@ class Config:
         self.signal_base_path = r"C:\Users\Data_signals_bp"
         self.save_path = r"D:\EPSCAN\001"
         
-        # =============================================
-        # 解析タイプ選択（個人内 or 個人間）
-        # =============================================
+        # 解析タイプ
         self.analysis_type = "individual"  # "individual"（個人内） or "cross"（個人間）
         
         # データ設定
         if self.analysis_type == "individual":
-            self.subjects = ["bp001"]  # 個人内解析の場合は1人のみ
+            self.subjects = ["bp001"]  # 個人内解析
             self.n_folds = 1  # 交差検証なし
-        else:  # cross
-            # 個人間解析の場合は全被験者
-            self.subjects = [f"bp{i:03d}" for i in range(1, 33)]  # bp001からbp032
+        else:
+            self.subjects = [f"bp{i:03d}" for i in range(1, 33)]  # bp001～bp032
             self.n_folds = 8  # 8分割交差検証
         
         self.tasks = ["t1-1", "t2", "t1-2", "t4", "t1-3", "t5"]
         self.task_duration = 60  # 各タスクの秒数
         
-        # =============================================
-        # モデル選択（ここを変更してモデルを切り替え）
-        # =============================================
-        # "CNN-LSTM", "3D-CNN", "Vision-Transformer" から選択
-        self.model_type = "CNN-LSTM"  
-        
-        # =============================================
-        # 使用チャンネル選択（ここを変更してチャンネルを切り替え）
-        # =============================================
-        # 'R': 赤成分のみ, 'G': 緑成分のみ, 'B': 青成分のみ, 'RGB': 全チャンネル
-        self.use_channel = 'B'  # B成分のみで学習
-        
-        # モデル設定
-        self.input_shape = (14, 16, 1 if self.use_channel != 'RGB' else 3)  # H, W, C
+        # 使用チャンネル
+        self.use_channel = 'B'  # 'R', 'G', 'B', 'RGB'
+        self.input_shape = (14, 16, 1 if self.use_channel != 'RGB' else 3)
         
         # 学習設定
         self.batch_size = 16
@@ -67,17 +53,18 @@ class Config:
         self.weight_decay = 1e-5
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
-        # データ分割比率（個人内解析の場合は各タスク内で、個人間の場合は訓練セット内で）
+        # データ分割
         self.train_ratio = 0.7
         self.val_ratio = 0.1
         self.test_ratio = 0.2
+        self.random_split = True  # True: ランダム分割, False: 順番分割
+        self.random_seed = 42
         
         # Early Stopping
         self.patience = 20
         
         # 表示設定
         self.verbose = True
-        self.save_every = 10  # 何エポックごとにチェックポイントを保存
 
 # ================================
 # データセット
@@ -87,22 +74,19 @@ class CODataset(Dataset):
         """
         rgb_data: (N, H, W, C) numpy array
         co_data: (N,) numpy array
-        use_channel: 'R', 'G', 'B', 'RGB'から選択
         """
         # チャンネル選択
         if use_channel == 'R':
-            selected_data = rgb_data[:, :, :, 0:1]  # R成分
+            selected_data = rgb_data[:, :, :, 0:1]
         elif use_channel == 'G':
-            selected_data = rgb_data[:, :, :, 1:2]  # G成分
+            selected_data = rgb_data[:, :, :, 1:2]
         elif use_channel == 'B':
-            selected_data = rgb_data[:, :, :, 2:3]  # B成分
+            selected_data = rgb_data[:, :, :, 2:3]
         else:  # 'RGB'
             selected_data = rgb_data
         
-        # (N, H, W, C) -> (N, C, H, W)
         self.rgb_data = torch.FloatTensor(selected_data).permute(0, 3, 1, 2)
         self.co_data = torch.FloatTensor(co_data)
-        self.use_channel = use_channel
     
     def __len__(self):
         return len(self.rgb_data)
@@ -111,188 +95,132 @@ class CODataset(Dataset):
         return self.rgb_data[idx], self.co_data[idx]
 
 # ================================
-# モデルアーキテクチャ
+# PhysNet2DCNNモデル
 # ================================
-
-# 1. CNN-LSTM モデル
-class CNN_LSTM(nn.Module):
+class PhysNet2DCNN(nn.Module):
+    """
+    PhysNetベースの2DCNNモデル
+    14×16の画像を224次元ベクトルとして処理
+    """
     def __init__(self, input_shape):
-        super(CNN_LSTM, self).__init__()
+        super(PhysNet2DCNN, self).__init__()
         
-        # 入力チャンネル数を取得
         in_channels = input_shape[2]
         
-        # CNN部分（特徴抽出）
-        self.cnn = nn.Sequential(
-            nn.Conv2d(in_channels, 32, kernel_size=3, padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-            
-            nn.Conv2d(32, 64, kernel_size=3, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-            
-            nn.Conv2d(64, 128, kernel_size=3, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool2d((1, 1))
+        # ConvBlock 1 (kernel_size=5)
+        self.conv_block1 = nn.Sequential(
+            nn.Conv1d(in_channels, 32, kernel_size=5, padding=2),
+            nn.BatchNorm1d(32),
+            nn.ELU(),
+            nn.Conv1d(32, 32, kernel_size=5, padding=2),
+            nn.BatchNorm1d(32),
+            nn.ELU()
+        )
+        self.avgpool1 = nn.AvgPool1d(kernel_size=2, stride=2)
+        
+        # ConvBlock 2 (kernel_size=3)
+        self.conv_block2 = nn.Sequential(
+            nn.Conv1d(32, 64, kernel_size=3, padding=1),
+            nn.BatchNorm1d(64),
+            nn.ELU(),
+            nn.Conv1d(64, 64, kernel_size=3, padding=1),
+            nn.BatchNorm1d(64),
+            nn.ELU()
+        )
+        self.avgpool2 = nn.AvgPool1d(kernel_size=2, stride=2)
+        
+        # ConvBlock 3
+        self.conv_block3 = nn.Sequential(
+            nn.Conv1d(64, 64, kernel_size=3, padding=1),
+            nn.BatchNorm1d(64),
+            nn.ELU(),
+            nn.Conv1d(64, 64, kernel_size=3, padding=1),
+            nn.BatchNorm1d(64),
+            nn.ELU()
+        )
+        self.avgpool3 = nn.AvgPool1d(kernel_size=2, stride=2)
+        
+        # ConvBlock 4
+        self.conv_block4 = nn.Sequential(
+            nn.Conv1d(64, 64, kernel_size=3, padding=1),
+            nn.BatchNorm1d(64),
+            nn.ELU(),
+            nn.Conv1d(64, 64, kernel_size=3, padding=1),
+            nn.BatchNorm1d(64),
+            nn.ELU()
+        )
+        self.avgpool4 = nn.AvgPool1d(kernel_size=2, stride=2)
+        
+        # ConvBlock 5
+        self.conv_block5 = nn.Sequential(
+            nn.Conv1d(64, 64, kernel_size=3, padding=1),
+            nn.BatchNorm1d(64),
+            nn.ELU(),
+            nn.Conv1d(64, 64, kernel_size=3, padding=1),
+            nn.BatchNorm1d(64),
+            nn.ELU()
         )
         
-        # LSTM部分
-        self.lstm = nn.LSTM(128, 64, num_layers=2, batch_first=True, dropout=0.2)
+        # Global Average Pooling
+        self.global_avgpool = nn.AdaptiveAvgPool1d(1)
         
-        # 出力層
-        self.fc = nn.Sequential(
-            nn.Linear(64, 32),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(32, 1)
-        )
-    
-    def forward(self, x):
-        batch_size = x.size(0)
-        
-        # CNN特徴抽出
-        cnn_out = self.cnn(x)
-        cnn_out = cnn_out.view(batch_size, -1)
-        
-        # LSTMのための形状変換
-        lstm_in = cnn_out.unsqueeze(1)
-        lstm_out, _ = self.lstm(lstm_in)
-        
-        # 最終出力
-        out = self.fc(lstm_out[:, -1, :])
-        return out.squeeze()
-
-# 2. 3D-CNN モデル
-class CNN3D(nn.Module):
-    def __init__(self, input_shape):
-        super(CNN3D, self).__init__()
-        
-        # 入力チャンネル数を取得（RGBの場合は3、単一チャンネルの場合は1）
-        # 3D-CNNの場合、チャンネル次元を時間次元として扱うため、入力は1チャンネルとして扱う
-        
-        self.conv3d_layers = nn.Sequential(
-            nn.Conv3d(1, 32, kernel_size=(3, 3, 3), padding=1),
-            nn.BatchNorm3d(32),
-            nn.ReLU(),
-            nn.MaxPool3d((1, 2, 1)),
-            
-            nn.Conv3d(32, 64, kernel_size=(3, 3, 3), padding=1),
-            nn.BatchNorm3d(64),
-            nn.ReLU(),
-            nn.MaxPool3d((1, 2, 1)),
-            
-            nn.Conv3d(64, 128, kernel_size=(3, 3, 3), padding=1),
-            nn.BatchNorm3d(128),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool3d((1, 1, input_shape[2]))  # チャンネル数に応じて調整
-        )
-        
-        self.fc_layers = nn.Sequential(
-            nn.Linear(128 * input_shape[2], 64),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(64, 32),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(32, 1)
-        )
-    
-    def forward(self, x):
-        batch_size = x.size(0)
-        
-        # 3D-CNNのための形状変換 (B, C, H, W) -> (B, 1, C, H, W)
-        x = x.unsqueeze(1)
-        
-        # 3D畳み込み
-        conv_out = self.conv3d_layers(x)
-        conv_out = conv_out.view(batch_size, -1)
-        
-        # 全結合層
-        out = self.fc_layers(conv_out)
-        return out.squeeze()
-
-# 3. Vision Transformer モデル
-class VisionTransformer(nn.Module):
-    def __init__(self, input_shape, patch_size=4, embed_dim=256, num_heads=8, num_layers=6):
-        super(VisionTransformer, self).__init__()
-        
-        self.patch_size = patch_size
-        self.num_patches = (input_shape[0] // patch_size) * (input_shape[1] // patch_size)
-        self.in_channels = input_shape[2]  # 入力チャンネル数
-        self.patch_dim = self.in_channels * patch_size * patch_size
-        
-        # パッチ埋め込み
-        self.patch_embed = nn.Linear(self.patch_dim, embed_dim)
-        
-        # 位置エンコーディング
-        self.pos_embed = nn.Parameter(torch.randn(1, self.num_patches + 1, embed_dim))
-        self.cls_token = nn.Parameter(torch.randn(1, 1, embed_dim))
+        # 1x1 Convolution
+        self.conv_final = nn.Conv1d(64, 1, kernel_size=1)
         
         # Dropout
-        self.dropout = nn.Dropout(0.1)
+        self.dropout = nn.Dropout(0.2)
         
-        # Transformer Encoder
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=embed_dim,
-            nhead=num_heads,
-            dim_feedforward=embed_dim * 4,
-            dropout=0.1,
-            batch_first=True
-        )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        
-        # 出力層
-        self.fc = nn.Sequential(
-            nn.LayerNorm(embed_dim),
-            nn.Linear(embed_dim, 128),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(128, 1)
-        )
-    
     def forward(self, x):
         batch_size = x.size(0)
+        in_channels = x.size(1)
         
-        # パッチ化 (B, C, H, W) -> (B, num_patches, patch_dim)
-        x = x.unfold(2, self.patch_size, self.patch_size).unfold(3, self.patch_size, self.patch_size)
-        x = x.contiguous().view(batch_size, self.in_channels, -1, self.patch_dim // self.in_channels)
-        x = x.permute(0, 2, 1, 3).contiguous().view(batch_size, self.num_patches, -1)
+        # (B, C, H, W) -> (B, C, H*W=224)
+        x = x.view(batch_size, in_channels, -1)
         
-        # パッチ埋め込み
-        x = self.patch_embed(x)
-        
-        # CLSトークンと位置エンコーディング
-        cls_tokens = self.cls_token.expand(batch_size, -1, -1)
-        x = torch.cat([cls_tokens, x], dim=1)
-        x = x + self.pos_embed
+        # ConvBlocks
+        x = self.conv_block1(x)
+        x = self.avgpool1(x)
         x = self.dropout(x)
         
-        # Transformer
-        x = self.transformer(x)
+        x = self.conv_block2(x)
+        x = self.avgpool2(x)
+        x = self.dropout(x)
         
-        # CLSトークンから出力
-        out = self.fc(x[:, 0])
-        return out.squeeze()
+        x = self.conv_block3(x)
+        x = self.avgpool3(x)
+        x = self.dropout(x)
+        
+        x = self.conv_block4(x)
+        x = self.avgpool4(x)
+        x = self.dropout(x)
+        
+        x = self.conv_block5(x)
+        
+        # Global Average Pooling
+        x = self.global_avgpool(x)
+        
+        # Final 1x1 Convolution
+        x = self.conv_final(x)
+        
+        x = x.squeeze()
+        if batch_size == 1:
+            x = x.unsqueeze(0)
+        
+        return x
 
 # ================================
-# データ読み込み関数
+# データ読み込み
 # ================================
 def load_data_single_subject(subject, config):
     """単一被験者のデータ読み込み"""
-    # RGB画像データの読み込み
     rgb_path = os.path.join(config.rgb_base_path, subject, 
                             f"{subject}_downsampled_1Hz.npy")
     if not os.path.exists(rgb_path):
         print(f"警告: {subject}のRGBデータが見つかりません")
         return None, None
-        
-    rgb_data = np.load(rgb_path)  # (360, 14, 16, 3)
     
-    # COデータの読み込みと結合
+    rgb_data = np.load(rgb_path)
+    
     co_data_list = []
     for task in config.tasks:
         co_path = os.path.join(config.signal_base_path, subject, 
@@ -300,35 +228,32 @@ def load_data_single_subject(subject, config):
         if not os.path.exists(co_path):
             print(f"警告: {subject}の{task}のCOデータが見つかりません")
             return None, None
-        co_task_data = np.load(co_path)  # (60,)
-        co_data_list.append(co_task_data)
+        co_data_list.append(np.load(co_path))
     
-    co_data = np.concatenate(co_data_list)  # (360,)
+    co_data = np.concatenate(co_data_list)
     return rgb_data, co_data
 
 def load_all_data(config):
-    """全データの読み込み（個人内または個人間）"""
+    """全データの読み込み"""
     print("="*60)
     print("データ読み込み中...")
     print("="*60)
     
     all_rgb_data = []
     all_co_data = []
-    all_subject_ids = []  # 被験者IDを記録（個人間解析用）
+    all_subject_ids = []
     
     for subject in config.subjects:
         rgb_data, co_data = load_data_single_subject(subject, config)
         if rgb_data is not None and co_data is not None:
             all_rgb_data.append(rgb_data)
             all_co_data.append(co_data)
-            # 被験者IDを360回繰り返して記録
             all_subject_ids.extend([subject] * len(rgb_data))
             print(f"✓ {subject}のデータ読み込み完了")
     
     if len(all_rgb_data) == 0:
         raise ValueError("データが読み込めませんでした")
     
-    # データを結合
     all_rgb_data = np.concatenate(all_rgb_data, axis=0)
     all_co_data = np.concatenate(all_co_data, axis=0)
     
@@ -343,11 +268,15 @@ def load_all_data(config):
     return all_rgb_data, all_co_data, all_subject_ids
 
 # ================================
-# データ分割関数
+# データ分割
 # ================================
 def split_data_individual(rgb_data, co_data, config):
-    """個人内解析用のデータ分割（タスクごと）"""
-    print("\nデータ分割中（個人内解析）...")
+    """個人内解析用のデータ分割"""
+    if config.random_split:
+        print("\nデータ分割中（ランダム分割）...")
+        np.random.seed(config.random_seed)
+    else:
+        print("\nデータ分割中（順番分割）...")
     
     train_rgb, train_co = [], []
     val_rgb, val_co = [], []
@@ -360,23 +289,38 @@ def split_data_individual(rgb_data, co_data, config):
         task_rgb = rgb_data[start_idx:end_idx]
         task_co = co_data[start_idx:end_idx]
         
-        # 各タスクを7:1:2に分割
-        train_end = int(config.task_duration * config.train_ratio)
-        val_end = train_end + int(config.task_duration * config.val_ratio)
+        train_size = int(config.task_duration * config.train_ratio)
+        val_size = int(config.task_duration * config.val_ratio)
+        test_size = config.task_duration - train_size - val_size
         
-        train_rgb.append(task_rgb[:train_end])
-        train_co.append(task_co[:train_end])
-        
-        val_rgb.append(task_rgb[train_end:val_end])
-        val_co.append(task_co[train_end:val_end])
-        
-        test_rgb.append(task_rgb[val_end:])
-        test_co.append(task_co[val_end:])
+        if config.random_split:
+            # ランダム分割
+            task_indices = np.arange(config.task_duration)
+            np.random.shuffle(task_indices)
+            
+            train_indices = task_indices[:train_size]
+            val_indices = task_indices[train_size:train_size + val_size]
+            test_indices = task_indices[train_size + val_size:]
+            
+            train_rgb.append(task_rgb[train_indices])
+            train_co.append(task_co[train_indices])
+            val_rgb.append(task_rgb[val_indices])
+            val_co.append(task_co[val_indices])
+            test_rgb.append(task_rgb[test_indices])
+            test_co.append(task_co[test_indices])
+        else:
+            # 順番分割
+            train_rgb.append(task_rgb[:train_size])
+            train_co.append(task_co[:train_size])
+            val_rgb.append(task_rgb[train_size:train_size + val_size])
+            val_co.append(task_co[train_size:train_size + val_size])
+            test_rgb.append(task_rgb[train_size + val_size:])
+            test_co.append(task_co[train_size + val_size:])
         
         if config.verbose:
-            print(f"  Task {task}: Train {train_end}, Val {val_end-train_end}, Test {config.task_duration-val_end}")
+            split_type = "ランダム" if config.random_split else "順番"
+            print(f"  Task {task}: Train {train_size}, Val {val_size}, Test {test_size} ({split_type})")
     
-    # 結合
     train_rgb = np.concatenate(train_rgb)
     train_co = np.concatenate(train_co)
     val_rgb = np.concatenate(val_rgb)
@@ -385,31 +329,23 @@ def split_data_individual(rgb_data, co_data, config):
     test_co = np.concatenate(test_co)
     
     print(f"\n分割結果:")
-    print(f"  訓練データ: {len(train_rgb)}サンプル")
-    print(f"  検証データ: {len(val_rgb)}サンプル")
-    print(f"  テストデータ: {len(test_rgb)}サンプル")
+    print(f"  訓練: {len(train_rgb)}サンプル")
+    print(f"  検証: {len(val_rgb)}サンプル")
+    print(f"  テスト: {len(test_rgb)}サンプル")
     
     return (train_rgb, train_co), (val_rgb, val_co), (test_rgb, test_co)
 
 # ================================
-# モデル作成関数
+# モデル作成
 # ================================
 def create_model(config):
-    """指定されたタイプのモデルを作成"""
-    print(f"\nモデル作成: {config.model_type}")
-    print(f"  入力形状: {config.input_shape} (H×W×C)")
+    """モデルの作成"""
+    print("\nPhysNet2DCNNモデル作成中...")
+    print(f"  入力形状: {config.input_shape} (14×16×{config.input_shape[2]})")
     print(f"  使用チャンネル: {config.use_channel}成分")
     
-    if config.model_type == "CNN-LSTM":
-        model = CNN_LSTM(config.input_shape)
-    elif config.model_type == "3D-CNN":
-        model = CNN3D(config.input_shape)
-    elif config.model_type == "Vision-Transformer":
-        model = VisionTransformer(config.input_shape)
-    else:
-        raise ValueError(f"Unknown model type: {config.model_type}")
+    model = PhysNet2DCNN(config.input_shape)
     
-    # パラメータ数の表示
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"  総パラメータ数: {total_params:,}")
@@ -418,12 +354,12 @@ def create_model(config):
     return model
 
 # ================================
-# 学習関数
+# 学習
 # ================================
 def train_model(model, train_loader, val_loader, config, fold=None):
     """モデルの学習"""
-    fold_str = f"Fold {fold+1}" if fold is not None else "全データ"
-    print(f"\n学習開始 - {fold_str}")
+    fold_str = f"Fold {fold+1}" if fold is not None else ""
+    print(f"\n学習開始 {fold_str}")
     
     model = model.to(config.device)
     criterion = nn.MSELoss()
@@ -441,12 +377,10 @@ def train_model(model, train_loader, val_loader, config, fold=None):
     patience_counter = 0
     
     for epoch in range(config.epochs):
-        # 学習モード
+        # 学習
         model.train()
         train_loss = 0
-        train_mae = 0
-        
-        for batch_idx, (rgb, co) in enumerate(train_loader):
+        for rgb, co in train_loader:
             rgb, co = rgb.to(config.device), co.to(config.device)
             
             optimizer.zero_grad()
@@ -456,13 +390,10 @@ def train_model(model, train_loader, val_loader, config, fold=None):
             optimizer.step()
             
             train_loss += loss.item()
-            train_mae += mean_absolute_error(pred.detach().cpu().numpy(), 
-                                            co.detach().cpu().numpy())
         
-        # 検証モード
+        # 検証
         model.eval()
         val_loss = 0
-        val_mae = 0
         val_preds = []
         val_targets = []
         
@@ -476,30 +407,25 @@ def train_model(model, train_loader, val_loader, config, fold=None):
                 val_preds.extend(pred.cpu().numpy())
                 val_targets.extend(co.cpu().numpy())
         
-        # 平均損失の計算
         train_loss /= len(train_loader)
         val_loss /= len(val_loader)
-        train_mae /= len(train_loader)
         val_mae = mean_absolute_error(val_preds, val_targets)
-        val_corr, _ = pearsonr(val_preds, val_targets)
         
         train_losses.append(train_loss)
         val_losses.append(val_loss)
         
-        # スケジューラー更新
         scheduler.step(val_loss)
         
-        # Early Stopping
+        # ベストモデル保存
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             patience_counter = 0
-            # ベストモデルの保存
             save_dir = Path(config.save_path)
             save_dir.mkdir(parents=True, exist_ok=True)
             if fold is not None:
-                model_name = f'best_model_{config.model_type}_{config.use_channel}_fold{fold+1}.pth'
+                model_name = f'best_model_fold{fold+1}.pth'
             else:
-                model_name = f'best_model_{config.model_type}_{config.use_channel}.pth'
+                model_name = 'best_model.pth'
             torch.save(model.state_dict(), save_dir / model_name)
         else:
             patience_counter += 1
@@ -510,18 +436,18 @@ def train_model(model, train_loader, val_loader, config, fold=None):
                   f"Train Loss: {train_loss:.4f} | "
                   f"Val Loss: {val_loss:.4f}, MAE: {val_mae:.4f}")
         
-        # Early Stopping判定
+        # Early Stopping
         if patience_counter >= config.patience:
-            print(f"  Early stopping triggered at epoch {epoch+1}")
+            print(f"  Early stopping at epoch {epoch+1}")
             break
     
-    # ベストモデルの読み込み
+    # ベストモデル読み込み
     model.load_state_dict(torch.load(save_dir / model_name))
     
     return model, train_losses, val_losses
 
 # ================================
-# 評価関数
+# 評価
 # ================================
 def evaluate_model(model, test_loader, config):
     """モデルの評価"""
@@ -539,48 +465,50 @@ def evaluate_model(model, test_loader, config):
     predictions = np.array(predictions)
     targets = np.array(targets)
     
-    # 評価指標の計算
     mae = mean_absolute_error(targets, predictions)
-    mse = np.mean((targets - predictions) ** 2)
-    rmse = np.sqrt(mse)
+    rmse = np.sqrt(np.mean((targets - predictions) ** 2))
     corr, p_value = pearsonr(targets, predictions)
     
-    # R²スコア
     ss_res = np.sum((targets - predictions) ** 2)
     ss_tot = np.sum((targets - np.mean(targets)) ** 2)
     r2 = 1 - (ss_res / ss_tot)
     
-    return mae, corr, predictions, targets, {'mse': mse, 'rmse': rmse, 'r2': r2, 'p_value': p_value}
+    return {
+        'mae': mae,
+        'rmse': rmse,
+        'corr': corr,
+        'r2': r2,
+        'p_value': p_value,
+        'predictions': predictions,
+        'targets': targets
+    }
 
 # ================================
-# 交差検証関数（個人間解析用）
+# 交差検証（個人間解析用）
 # ================================
 def cross_validation(rgb_data, co_data, subject_ids, config):
     """個人間解析の交差検証"""
     print("\n" + "="*60)
-    print(f"{config.n_folds}分割交差検証を開始（個人間解析）")
+    print(f"{config.n_folds}分割交差検証開始")
     print("="*60)
     
-    # 被験者ごとにインデックスをグループ化
     unique_subjects = sorted(list(set(subject_ids)))
     subject_indices = {subj: [] for subj in unique_subjects}
     for i, subj in enumerate(subject_ids):
         subject_indices[subj].append(i)
     
-    # KFoldで被験者を分割
-    kf = KFold(n_splits=config.n_folds, shuffle=True, random_state=42)
+    kf = KFold(n_splits=config.n_folds, shuffle=True, random_state=config.random_seed)
     
     results = []
     for fold, (train_subj_idx, test_subj_idx) in enumerate(kf.split(unique_subjects)):
         print(f"\n--- Fold {fold+1}/{config.n_folds} ---")
         
-        # 被験者レベルで訓練とテストに分割
         train_subjects = [unique_subjects[i] for i in train_subj_idx]
         test_subjects = [unique_subjects[i] for i in test_subj_idx]
         
         print(f"  テスト被験者: {test_subjects}")
         
-        # インデックスを取得
+        # インデックス取得
         train_indices = []
         for subj in train_subjects:
             train_indices.extend(subject_indices[subj])
@@ -594,16 +522,14 @@ def cross_validation(rgb_data, co_data, subject_ids, config):
         test_rgb = rgb_data[test_indices]
         test_co = co_data[test_indices]
         
-        # 訓練・検証データをさらに分割（8:2）
+        # 訓練・検証分割
         split_idx = int(len(train_val_rgb) * 0.8)
         train_rgb = train_val_rgb[:split_idx]
         train_co = train_val_co[:split_idx]
         val_rgb = train_val_rgb[split_idx:]
         val_co = train_val_co[split_idx:]
         
-        print(f"  訓練: {len(train_rgb)}サンプル, 検証: {len(val_rgb)}サンプル, テスト: {len(test_rgb)}サンプル")
-        
-        # データセットとローダー作成
+        # データローダー作成
         train_dataset = CODataset(train_rgb, train_co, config.use_channel)
         val_dataset = CODataset(val_rgb, val_co, config.use_channel)
         test_dataset = CODataset(test_rgb, test_co, config.use_channel)
@@ -612,34 +538,34 @@ def cross_validation(rgb_data, co_data, subject_ids, config):
         val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False)
         test_loader = DataLoader(test_dataset, batch_size=config.batch_size, shuffle=False)
         
-        # モデルの作成と学習
+        # モデル作成と学習
         model = create_model(config)
         model, train_losses, val_losses = train_model(model, train_loader, val_loader, config, fold)
         
         # 評価
-        mae, corr, predictions, targets, metrics = evaluate_model(model, test_loader, config)
-        print(f"  結果 - MAE: {mae:.4f}, 相関係数: {corr:.4f}")
+        eval_results = evaluate_model(model, test_loader, config)
+        print(f"  結果 - MAE: {eval_results['mae']:.4f}, Corr: {eval_results['corr']:.4f}")
         
         results.append({
             'fold': fold,
-            'mae': mae,
-            'corr': corr,
-            'predictions': predictions,
-            'targets': targets,
-            'metrics': metrics,
-            'train_losses': train_losses,
-            'val_losses': val_losses,
+            'mae': eval_results['mae'],
+            'corr': eval_results['corr'],
+            'predictions': eval_results['predictions'],
+            'targets': eval_results['targets'],
             'test_subjects': test_subjects
         })
     
     return results
 
 # ================================
-# プロット関数（個人内解析用）
+# プロット（個人内）
 # ================================
-def plot_results_individual(predictions, targets, train_losses, val_losses, mae, corr, config):
+def plot_results_individual(eval_results, train_losses, val_losses, config):
     """個人内解析の結果プロット"""
     fig = plt.figure(figsize=(15, 10))
+    
+    predictions = eval_results['predictions']
+    targets = eval_results['targets']
     
     # 1. 学習曲線
     ax1 = plt.subplot(2, 3, 1)
@@ -651,7 +577,7 @@ def plot_results_individual(predictions, targets, train_losses, val_losses, mae,
     ax1.legend()
     ax1.grid(True, alpha=0.3)
     
-    # 2. 予測値 vs 真値（散布図）
+    # 2. 予測値 vs 真値
     ax2 = plt.subplot(2, 3, 2)
     ax2.scatter(targets, predictions, alpha=0.5, s=20)
     min_val = min(targets.min(), predictions.min())
@@ -659,7 +585,7 @@ def plot_results_individual(predictions, targets, train_losses, val_losses, mae,
     ax2.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2, label='理想線')
     ax2.set_xlabel('真値 (CO)')
     ax2.set_ylabel('予測値 (CO)')
-    ax2.set_title(f'予測結果\nMAE: {mae:.3f}, Corr: {corr:.3f}')
+    ax2.set_title(f"予測結果\nMAE: {eval_results['mae']:.3f}, Corr: {eval_results['corr']:.3f}")
     ax2.legend()
     ax2.grid(True, alpha=0.3)
     
@@ -669,11 +595,11 @@ def plot_results_individual(predictions, targets, train_losses, val_losses, mae,
     ax3.scatter(predictions, residuals, alpha=0.5, s=20)
     ax3.axhline(y=0, color='r', linestyle='--', lw=2)
     ax3.set_xlabel('予測値')
-    ax3.set_ylabel('残差 (真値 - 予測値)')
+    ax3.set_ylabel('残差')
     ax3.set_title(f'残差プロット\n平均: {residuals.mean():.3f}, 標準偏差: {residuals.std():.3f}')
     ax3.grid(True, alpha=0.3)
     
-    # 4. 時系列プロット（最初の120サンプル）
+    # 4. 時系列プロット
     ax4 = plt.subplot(2, 3, 4)
     sample_range = min(120, len(targets))
     x_axis = np.arange(sample_range)
@@ -685,11 +611,12 @@ def plot_results_individual(predictions, targets, train_losses, val_losses, mae,
     ax4.legend()
     ax4.grid(True, alpha=0.3)
     
-    # 5. 誤差のヒストグラム
+    # 5. 誤差ヒストグラム
     ax5 = plt.subplot(2, 3, 5)
     errors = np.abs(targets - predictions)
     ax5.hist(errors, bins=30, edgecolor='black', alpha=0.7)
-    ax5.axvline(x=mae, color='r', linestyle='--', lw=2, label=f'MAE: {mae:.3f}')
+    ax5.axvline(x=eval_results['mae'], color='r', linestyle='--', lw=2, 
+                label=f"MAE: {eval_results['mae']:.3f}")
     ax5.set_xlabel('絶対誤差')
     ax5.set_ylabel('頻度')
     ax5.set_title('絶対誤差の分布')
@@ -723,34 +650,27 @@ def plot_results_individual(predictions, targets, train_losses, val_losses, mae,
     ax6.set_title('タスクごとの性能')
     ax6.set_xticks(x_pos)
     ax6.set_xticklabels(config.tasks)
-    ax6.tick_params(axis='y', labelcolor='blue')
-    ax6_twin.tick_params(axis='y', labelcolor='orange')
     ax6.grid(True, alpha=0.3)
     
-    subjects_str = config.subjects[0] if len(config.subjects) == 1 else f"{len(config.subjects)}名"
-    plt.suptitle(f'CO推定結果 - {config.model_type} ({subjects_str}) - {config.use_channel}成分使用', 
+    plt.suptitle(f'PhysNet2DCNN - CO推定結果 ({config.subjects[0]}) - {config.use_channel}成分', 
                 fontsize=16, y=1.02)
     plt.tight_layout()
     
-    # 保存
     save_dir = Path(config.save_path)
     save_dir.mkdir(parents=True, exist_ok=True)
-    analysis_type = "individual" if config.analysis_type == "individual" else "cross"
-    plt.savefig(save_dir / f'results_{config.model_type}_{analysis_type}_{config.use_channel}.png', 
+    plt.savefig(save_dir / f'results_individual_{config.use_channel}.png', 
                 dpi=150, bbox_inches='tight')
     plt.show()
-    
-    print(f"\nグラフを保存しました")
 
 # ================================
-# プロット関数（個人間解析用）
+# プロット（個人間）
 # ================================
 def plot_results_cross(results, config):
     """個人間解析の結果プロット"""
     n_plots = min(config.n_folds, 8)
     fig = plt.figure(figsize=(20, 12))
     
-    # 各foldの結果をプロット（最大8個）
+    # 各fold結果
     for i in range(n_plots):
         ax = plt.subplot(3, 3, i+1)
         fold_result = results[i]
@@ -762,10 +682,10 @@ def plot_results_cross(results, config):
         
         ax.set_xlabel('真値 (CO)')
         ax.set_ylabel('予測値 (CO)')
-        ax.set_title(f'Fold {i+1}\nMAE: {fold_result["mae"]:.3f}, Corr: {fold_result["corr"]:.3f}')
+        ax.set_title(f"Fold {i+1}\nMAE: {fold_result['mae']:.3f}, Corr: {fold_result['corr']:.3f}")
         ax.grid(True, alpha=0.3)
     
-    # 全体の結果（最後のサブプロット）
+    # 全体結果
     ax = plt.subplot(3, 3, 9)
     all_targets = np.concatenate([r['targets'] for r in results])
     all_predictions = np.concatenate([r['predictions'] for r in results])
@@ -782,32 +702,30 @@ def plot_results_cross(results, config):
     ax.set_title(f'全体結果\nMAE: {overall_mae:.3f}, Corr: {overall_corr:.3f}')
     ax.grid(True, alpha=0.3)
     
-    plt.suptitle(f'CO推定結果 - {config.model_type} (個人間解析, {config.n_folds}分割交差検証) - {config.use_channel}成分使用', 
+    plt.suptitle(f'PhysNet2DCNN - CO推定結果 ({config.n_folds}分割交差検証) - {config.use_channel}成分', 
                 fontsize=16, y=1.02)
     plt.tight_layout()
     
-    # 保存
     save_dir = Path(config.save_path)
     save_dir.mkdir(parents=True, exist_ok=True)
-    plt.savefig(save_dir / f'results_{config.model_type}_cross_{config.use_channel}.png', 
+    plt.savefig(save_dir / f'results_cross_{config.use_channel}.png', 
                 dpi=150, bbox_inches='tight')
     plt.show()
     
     return overall_mae, overall_corr
 
 # ================================
-# メイン実行関数
+# メイン実行
 # ================================
 def main():
-    # 設定の初期化
     config = Config()
     
     print("\n" + "="*60)
-    print(f" CO推定モデル")
+    print(" PhysNet2DCNN - CO推定モデル")
     print("="*60)
-    print(f"解析タイプ: {'個人内解析' if config.analysis_type == 'individual' else '個人間解析'}")
-    print(f"モデル: {config.model_type}")
+    print(f"解析タイプ: {'個人内' if config.analysis_type == 'individual' else '個人間'}")
     print(f"使用チャンネル: {config.use_channel}成分")
+    print(f"データ分割: {'ランダム' if config.random_split else '順番'}")
     print(f"デバイス: {config.device}")
     print(f"保存先: {config.save_path}")
     
@@ -816,110 +734,70 @@ def main():
         rgb_data, co_data, subject_ids = load_all_data(config)
         
         if config.analysis_type == "individual":
-            # ========== 個人内解析 ==========
-            # データ分割
+            # 個人内解析
             train_data, val_data, test_data = split_data_individual(rgb_data, co_data, config)
             train_rgb, train_co = train_data
             val_rgb, val_co = val_data
             test_rgb, test_co = test_data
             
-            # データセットとDataLoaderの作成
+            # データローダー作成
             train_dataset = CODataset(train_rgb, train_co, config.use_channel)
             val_dataset = CODataset(val_rgb, val_co, config.use_channel)
             test_dataset = CODataset(test_rgb, test_co, config.use_channel)
             
-            train_loader = DataLoader(train_dataset, batch_size=config.batch_size, 
-                                    shuffle=True, num_workers=0)
-            val_loader = DataLoader(val_dataset, batch_size=config.batch_size, 
-                                  shuffle=False, num_workers=0)
-            test_loader = DataLoader(test_dataset, batch_size=config.batch_size, 
-                                   shuffle=False, num_workers=0)
+            train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True)
+            val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False)
+            test_loader = DataLoader(test_dataset, batch_size=config.batch_size, shuffle=False)
             
             # モデル作成と学習
             model = create_model(config)
             model, train_losses, val_losses = train_model(model, train_loader, val_loader, config)
             
-            # テストデータで評価
-            print("\n" + "="*60)
-            print("テストデータでの評価")
-            print("="*60)
-            mae, corr, predictions, targets, metrics = evaluate_model(model, test_loader, config)
-            print(f"  MAE: {mae:.4f}")
-            print(f"  RMSE: {metrics['rmse']:.4f}")
-            print(f"  相関係数: {corr:.4f} (p値: {metrics['p_value']:.2e})")
-            print(f"  R²スコア: {metrics['r2']:.4f}")
+            # 評価
+            print("\nテストデータで評価中...")
+            eval_results = evaluate_model(model, test_loader, config)
             
-            # 結果の可視化
-            plot_results_individual(predictions, targets, train_losses, val_losses, mae, corr, config)
+            print("\n結果:")
+            print(f"  MAE: {eval_results['mae']:.4f}")
+            print(f"  RMSE: {eval_results['rmse']:.4f}")
+            print(f"  相関係数: {eval_results['corr']:.4f} (p={eval_results['p_value']:.2e})")
+            print(f"  R²スコア: {eval_results['r2']:.4f}")
             
-            # 結果の保存
+            # プロット
+            plot_results_individual(eval_results, train_losses, val_losses, config)
+            
+            # 結果保存
             save_dir = Path(config.save_path)
-            results = {
-                'predictions': predictions,
-                'targets': targets,
-                'mae': mae,
-                'correlation': corr,
-                'metrics': metrics,
-                'train_losses': train_losses,
-                'val_losses': val_losses,
-                'config': {
-                    'analysis_type': config.analysis_type,
-                    'model_type': config.model_type,
-                    'subjects': config.subjects,
-                    'use_channel': config.use_channel,
-                    'batch_size': config.batch_size,
-                    'epochs': len(train_losses),
-                    'learning_rate': config.learning_rate
-                }
-            }
-            np.save(save_dir / f'results_{config.model_type}_individual_{config.use_channel}.npy', 
-                    results, allow_pickle=True)
+            np.save(save_dir / f'results_individual_{config.use_channel}.npy', 
+                    {'eval_results': eval_results, 
+                     'train_losses': train_losses,
+                     'val_losses': val_losses}, 
+                    allow_pickle=True)
             
         else:
-            # ========== 個人間解析 ==========
+            # 個人間解析
             results = cross_validation(rgb_data, co_data, subject_ids, config)
             
-            # 結果の可視化
+            # プロット
             overall_mae, overall_corr = plot_results_cross(results, config)
             
-            # 結果の保存
+            # 結果保存
             save_dir = Path(config.save_path)
-            np.save(save_dir / f'results_{config.model_type}_cross_{config.use_channel}.npy', 
+            np.save(save_dir / f'results_cross_{config.use_channel}.npy', 
                     results, allow_pickle=True)
             
-            # 各Foldの結果サマリー
+            # サマリー表示
             print("\n" + "="*60)
-            print(" 交差検証結果サマリー")
+            print(" 交差検証結果")
             print("="*60)
             for r in results:
                 print(f"Fold {r['fold']+1}: MAE={r['mae']:.4f}, Corr={r['corr']:.4f}")
             print(f"\n全体: MAE={overall_mae:.4f}, Corr={overall_corr:.4f}")
         
-        # 最終サマリーの表示
-        print("\n" + "="*60)
-        print(" 学習完了 - 最終結果")
-        print("="*60)
-        print(f"解析タイプ: {'個人内解析' if config.analysis_type == 'individual' else '個人間解析'}")
-        print(f"モデル: {config.model_type}")
-        print(f"被験者: {config.subjects[0] if len(config.subjects) == 1 else f'{len(config.subjects)}名'}")
-        print(f"使用チャンネル: {config.use_channel}成分")
-        
-        if config.analysis_type == "individual":
-            print(f"テストデータ性能:")
-            print(f"  - MAE: {mae:.4f}")
-            print(f"  - 相関係数: {corr:.4f}")
-            print(f"  - RMSE: {metrics['rmse']:.4f}")
-            print(f"  - R²スコア: {metrics['r2']:.4f}")
-        else:
-            print(f"交差検証結果:")
-            print(f"  - 全体MAE: {overall_mae:.4f}")
-            print(f"  - 全体相関係数: {overall_corr:.4f}")
-        
-        print(f"\n保存先: {save_dir}")
-        print("="*60)
+        print("\n完了しました。")
         
     except Exception as e:
-        print(f"\nエラーが発生しました: {e}")
+        print(f"\nエラー: {e}")
         import traceback
         traceback.print_exc()
 
