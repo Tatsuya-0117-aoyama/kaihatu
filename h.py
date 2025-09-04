@@ -10,6 +10,7 @@ from scipy.stats import pearsonr
 from sklearn.model_selection import KFold
 import os
 from pathlib import Path
+from datetime import datetime
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -26,10 +27,14 @@ class Config:
         # パス設定
         self.rgb_base_path = r"C:\Users\EyeBelow"
         self.signal_base_path = r"C:\Users\Data_signals_bp"
-        self.save_path = r"D:\EPSCAN\001"
+        self.base_save_path = r"D:\EPSCAN\001"
+        
+        # 日付時間フォルダを作成
+        self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.save_path = os.path.join(self.base_save_path, self.timestamp)
         
         # 解析タイプ
-        self.analysis_type = "individual"  # "individual" or "cross"
+        self.analysis_type = "individual"  # "individual"（個人内） or "cross"（個人間）
         
         # データ設定
         if self.analysis_type == "individual":
@@ -42,15 +47,7 @@ class Config:
         self.tasks = ["t1-1", "t2", "t1-2", "t4", "t1-3", "t5"]
         self.task_duration = 60
         
-        # データ拡張設定
-        self.use_augmentation = True  # データ拡張を使用するか
-        self.aug_noise_level = 0.01  # ノイズレベル
-        self.aug_scale_range = (0.95, 1.05)  # スケーリング範囲
-        self.aug_brightness_range = (-0.05, 0.05)  # 明度変化範囲
-        self.aug_mixup_alpha = 0.2  # Mixupの強度
-        self.aug_cutmix_prob = 0.3  # CutMixの確率
-        
-        # 使用チャンネル
+        # 使用チャンネル設定
         self.use_channel = 'B'  # 'R', 'G', 'B', 'RGB'
         self.input_shape = (14, 16, 1 if self.use_channel != 'RGB' else 3)
         
@@ -63,15 +60,15 @@ class Config:
         
         # 損失関数設定
         self.loss_type = "combined"  # "mse", "combined", "huber_combined"
-        self.loss_alpha = 0.7
-        self.loss_beta = 0.3
+        self.loss_alpha = 0.7  # MSE/Huber損失の重み
+        self.loss_beta = 0.3   # 相関損失の重み
         
-        # スケジューラー設定
+        # 学習率スケジューラー設定
         self.scheduler_type = "cosine"  # "cosine", "onecycle", "plateau"
-        self.scheduler_T0 = 20
-        self.scheduler_T_mult = 1
+        self.scheduler_T0 = 20  # CosineAnnealingWarmRestartsの初期周期
+        self.scheduler_T_mult = 1  # 周期の倍率
         
-        # データ分割
+        # データ分割設定
         self.train_ratio = 0.7
         self.val_ratio = 0.1
         self.test_ratio = 0.2
@@ -85,109 +82,10 @@ class Config:
         self.verbose = True
 
 # ================================
-# データ拡張関数
-# ================================
-class DataAugmentation:
-    """生理信号用のデータ拡張"""
-    
-    @staticmethod
-    def add_noise(rgb_data, noise_level=0.01):
-        """ガウシアンノイズを追加"""
-        noise = np.random.normal(0, noise_level, rgb_data.shape)
-        augmented = rgb_data + noise
-        return np.clip(augmented, 0, 1) if rgb_data.max() <= 1 else augmented
-    
-    @staticmethod
-    def scale_amplitude(rgb_data, co_data, scale_range=(0.95, 1.05)):
-        """振幅スケーリング（個人差をシミュレート）"""
-        scale_rgb = np.random.uniform(scale_range[0], scale_range[1])
-        scale_co = np.random.uniform(scale_range[0], scale_range[1])
-        return rgb_data * scale_rgb, co_data * scale_co
-    
-    @staticmethod
-    def brightness_adjust(rgb_data, brightness_range=(-0.05, 0.05)):
-        """明度調整（照明条件の変化をシミュレート）"""
-        brightness = np.random.uniform(brightness_range[0], brightness_range[1])
-        augmented = rgb_data + brightness
-        return np.clip(augmented, 0, 1) if rgb_data.max() <= 1 else augmented
-    
-    @staticmethod
-    def channel_shuffle(rgb_data):
-        """チャンネルシャッフル（RGBの順序をランダムに）"""
-        if rgb_data.shape[-1] == 3:
-            channels = [0, 1, 2]
-            np.random.shuffle(channels)
-            return rgb_data[:, :, :, channels]
-        return rgb_data
-    
-    @staticmethod
-    def mixup(rgb1, co1, rgb2, co2, alpha=0.2):
-        """Mixup augmentation"""
-        lam = np.random.beta(alpha, alpha)
-        mixed_rgb = lam * rgb1 + (1 - lam) * rgb2
-        mixed_co = lam * co1 + (1 - lam) * co2
-        return mixed_rgb, mixed_co
-    
-    @staticmethod
-    def cutmix(rgb1, co1, rgb2, co2, prob=0.5):
-        """CutMix augmentation"""
-        if np.random.rand() > prob:
-            return rgb1, co1
-        
-        H, W = rgb1.shape[0], rgb1.shape[1]
-        lam = np.random.beta(1.0, 1.0)
-        
-        cut_rat = np.sqrt(1. - lam)
-        cut_h = int(H * cut_rat)
-        cut_w = int(W * cut_rat)
-        
-        cx = np.random.randint(W)
-        cy = np.random.randint(H)
-        
-        bbx1 = np.clip(cx - cut_w // 2, 0, W)
-        bby1 = np.clip(cy - cut_h // 2, 0, H)
-        bbx2 = np.clip(cx + cut_w // 2, 0, W)
-        bby2 = np.clip(cy + cut_h // 2, 0, H)
-        
-        mixed_rgb = rgb1.copy()
-        mixed_rgb[bby1:bby2, bbx1:bbx2] = rgb2[bby1:bby2, bbx1:bbx2]
-        
-        # CO値も面積比に応じて混合
-        lam = 1 - ((bbx2 - bbx1) * (bby2 - bby1) / (H * W))
-        mixed_co = lam * co1 + (1 - lam) * co2
-        
-        return mixed_rgb, mixed_co
-    
-    @staticmethod
-    def random_erasing(rgb_data, prob=0.3, area_range=(0.02, 0.1)):
-        """Random Erasing（一部領域をマスク）"""
-        if np.random.rand() > prob:
-            return rgb_data
-        
-        H, W = rgb_data.shape[0], rgb_data.shape[1]
-        area = H * W
-        
-        target_area = np.random.uniform(area_range[0], area_range[1]) * area
-        aspect_ratio = np.random.uniform(0.3, 3.3)
-        
-        h = int(np.sqrt(target_area * aspect_ratio))
-        w = int(np.sqrt(target_area / aspect_ratio))
-        
-        if h < H and w < W:
-            y = np.random.randint(0, H - h)
-            x = np.random.randint(0, W - w)
-            
-            augmented = rgb_data.copy()
-            # ランダム値で埋める
-            augmented[y:y+h, x:x+w] = np.random.uniform(0, 1, (h, w, rgb_data.shape[2]))
-            return augmented
-        
-        return rgb_data
-
-# ================================
 # カスタム損失関数
 # ================================
 class CombinedLoss(nn.Module):
+    """MSE損失と相関損失を組み合わせた複合損失関数"""
     def __init__(self, alpha=0.7, beta=0.3):
         super().__init__()
         self.alpha = alpha
@@ -195,8 +93,10 @@ class CombinedLoss(nn.Module):
         self.mse = nn.MSELoss()
     
     def forward(self, pred, target):
+        # MSE損失
         mse_loss = self.mse(pred, target)
         
+        # 相関損失
         pred_mean = pred - pred.mean()
         target_mean = target - target.mean()
         
@@ -210,6 +110,7 @@ class CombinedLoss(nn.Module):
         return total_loss, mse_loss, corr_loss
 
 class HuberCorrelationLoss(nn.Module):
+    """Huber損失と相関損失の組み合わせ（外れ値にロバスト）"""
     def __init__(self, delta=1.0, alpha=0.7, beta=0.3):
         super().__init__()
         self.delta = delta
@@ -218,8 +119,10 @@ class HuberCorrelationLoss(nn.Module):
         self.huber = nn.HuberLoss(delta=delta)
     
     def forward(self, pred, target):
+        # Huber損失
         huber_loss = self.huber(pred, target)
         
+        # 相関損失
         pred_mean = pred - pred.mean()
         target_mean = target - target.mean()
         
@@ -233,69 +136,28 @@ class HuberCorrelationLoss(nn.Module):
         return total_loss, huber_loss, corr_loss
 
 # ================================
-# データセット（データ拡張対応）
+# データセット
 # ================================
-class AugmentedCODataset(Dataset):
-    def __init__(self, rgb_data, co_data, use_channel='B', 
-                 is_training=False, config=None):
-        self.is_training = is_training
-        self.config = config
-        self.augmentor = DataAugmentation()
-        
+class CODataset(Dataset):
+    def __init__(self, rgb_data, co_data, use_channel='B'):
         # チャンネル選択
         if use_channel == 'R':
-            self.rgb_data = rgb_data[:, :, :, 0:1]
+            selected_data = rgb_data[:, :, :, 0:1]
         elif use_channel == 'G':
-            self.rgb_data = rgb_data[:, :, :, 1:2]
+            selected_data = rgb_data[:, :, :, 1:2]
         elif use_channel == 'B':
-            self.rgb_data = rgb_data[:, :, :, 2:3]
+            selected_data = rgb_data[:, :, :, 2:3]
         else:
-            self.rgb_data = rgb_data
+            selected_data = rgb_data
         
-        self.co_data = co_data
-        self.indices = list(range(len(self.rgb_data)))
+        self.rgb_data = torch.FloatTensor(selected_data).permute(0, 3, 1, 2)
+        self.co_data = torch.FloatTensor(co_data)
     
     def __len__(self):
         return len(self.rgb_data)
     
     def __getitem__(self, idx):
-        rgb = self.rgb_data[idx].copy()
-        co = self.co_data[idx].copy()
-        
-        # 訓練時のみデータ拡張を適用
-        if self.is_training and self.config and self.config.use_augmentation:
-            # ランダムにデータ拡張を適用
-            if np.random.rand() < 0.5:
-                rgb = self.augmentor.add_noise(rgb, self.config.aug_noise_level)
-            
-            if np.random.rand() < 0.3:
-                rgb, co = self.augmentor.scale_amplitude(rgb, co, self.config.aug_scale_range)
-            
-            if np.random.rand() < 0.3:
-                rgb = self.augmentor.brightness_adjust(rgb, self.config.aug_brightness_range)
-            
-            if np.random.rand() < 0.2:
-                rgb = self.augmentor.random_erasing(rgb, prob=0.5)
-            
-            # Mixup or CutMix（別のサンプルとの混合）
-            if np.random.rand() < 0.3 and len(self.indices) > 1:
-                # ランダムに別のサンプルを選択
-                idx2 = np.random.choice([i for i in self.indices if i != idx])
-                rgb2 = self.rgb_data[idx2]
-                co2 = self.co_data[idx2]
-                
-                if np.random.rand() < 0.5:
-                    rgb, co = self.augmentor.mixup(rgb, co, rgb2, co2, 
-                                                  self.config.aug_mixup_alpha)
-                else:
-                    rgb, co = self.augmentor.cutmix(rgb, co, rgb2, co2, 
-                                                   self.config.aug_cutmix_prob)
-        
-        # Tensorに変換
-        rgb_tensor = torch.FloatTensor(rgb).permute(2, 0, 1)  # (H,W,C) -> (C,H,W)
-        co_tensor = torch.FloatTensor([co])
-        
-        return rgb_tensor, co_tensor.squeeze()
+        return self.rgb_data[idx], self.co_data[idx]
 
 # ================================
 # PhysNet2DCNNモデル
@@ -376,7 +238,7 @@ class PhysNet2DCNN(nn.Module):
         # (B, C, H, W) -> (B, C, H*W=224)
         x = x.view(batch_size, in_channels, -1)
         
-        # PhysNet blocks
+        # ConvBlocks with pooling and dropout
         x = self.conv_block1(x)
         x = self.avgpool1(x)
         x = self.dropout(x)
@@ -395,7 +257,7 @@ class PhysNet2DCNN(nn.Module):
         
         x = self.conv_block5(x)
         
-        # Global pooling and output
+        # Global pooling and final output
         x = self.global_avgpool(x)
         x = self.conv_final(x)
         
@@ -416,9 +278,6 @@ def load_data_single_subject(subject, config):
         return None, None
     
     rgb_data = np.load(rgb_path)
-    # 正規化（0-1の範囲に）
-    if rgb_data.max() > 1:
-        rgb_data = (rgb_data - rgb_data.min()) / (rgb_data.max() - rgb_data.min())
     
     co_data_list = []
     for task in config.tasks:
@@ -459,12 +318,11 @@ def load_all_data(config):
     print(f"  被験者数: {len(config.subjects)}")
     print(f"  データ形状: {all_rgb_data.shape}")
     print(f"  使用チャンネル: {config.use_channel}成分")
-    print(f"  データ拡張: {'有効' if config.use_augmentation else '無効'}")
     
     return all_rgb_data, all_co_data, all_subject_ids
 
 # ================================
-# データ分割
+# データ分割（個人内）
 # ================================
 def split_data_individual(rgb_data, co_data, config):
     if config.random_split:
@@ -529,7 +387,7 @@ def train_model(model, train_loader, val_loader, config, fold=None):
     
     model = model.to(config.device)
     
-    # 損失関数
+    # 損失関数の選択
     if config.loss_type == "combined":
         print(f"  損失関数: CombinedLoss (α={config.loss_alpha}, β={config.loss_beta})")
         criterion = CombinedLoss(alpha=config.loss_alpha, beta=config.loss_beta)
@@ -545,7 +403,7 @@ def train_model(model, train_loader, val_loader, config, fold=None):
     optimizer = optim.Adam(model.parameters(), lr=config.learning_rate, 
                           weight_decay=config.weight_decay)
     
-    # スケジューラー
+    # スケジューラーの選択
     if config.scheduler_type == "cosine":
         print(f"  スケジューラー: CosineAnnealingWarmRestarts")
         scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
@@ -575,10 +433,12 @@ def train_model(model, train_loader, val_loader, config, fold=None):
     best_val_corr = -1
     patience_counter = 0
     
-    print(f"  データ拡張: {'有効' if config.use_augmentation else '無効'}")
+    # 学習時の予測値と真値を保存
+    train_preds_best = None
+    train_targets_best = None
     
     for epoch in range(config.epochs):
-        # 学習
+        # 学習フェーズ
         model.train()
         train_loss = 0
         train_preds_all = []
@@ -603,7 +463,7 @@ def train_model(model, train_loader, val_loader, config, fold=None):
             train_preds_all.extend(pred.detach().cpu().numpy())
             train_targets_all.extend(co.detach().cpu().numpy())
         
-        # 検証
+        # 検証フェーズ
         model.eval()
         val_loss = 0
         val_preds = []
@@ -646,6 +506,10 @@ def train_model(model, train_loader, val_loader, config, fold=None):
             best_val_corr = val_corr
             patience_counter = 0
             
+            # 最良時の訓練データの予測値を保存
+            train_preds_best = np.array(train_preds_all)
+            train_targets_best = np.array(train_targets_all)
+            
             save_dir = Path(config.save_path)
             save_dir.mkdir(parents=True, exist_ok=True)
             model_name = f'best_model_fold{fold+1}.pth' if fold is not None else 'best_model.pth'
@@ -675,7 +539,7 @@ def train_model(model, train_loader, val_loader, config, fold=None):
     checkpoint = torch.load(save_dir / model_name)
     model.load_state_dict(checkpoint['model_state_dict'])
     
-    return model, train_losses, val_losses, train_correlations, val_correlations
+    return model, train_preds_best, train_targets_best
 
 # ================================
 # 評価
@@ -710,180 +574,243 @@ def evaluate_model(model, test_loader, config):
     }
 
 # ================================
-# プロット
+# プロット（個人内）
 # ================================
-def plot_results(eval_results, train_losses, val_losses, 
-                train_correlations, val_correlations, config):
-    fig = plt.figure(figsize=(20, 12))
-    
-    predictions = eval_results['predictions']
-    targets = eval_results['targets']
-    
-    # 1. 損失曲線
-    ax1 = plt.subplot(3, 4, 1)
-    ax1.plot(train_losses, label='Train Loss', alpha=0.8)
-    ax1.plot(val_losses, label='Val Loss', alpha=0.8)
-    ax1.set_xlabel('Epoch')
-    ax1.set_ylabel('Loss')
-    ax1.set_title('損失の学習曲線')
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
-    
-    # 2. 相関曲線
-    ax2 = plt.subplot(3, 4, 2)
-    ax2.plot(train_correlations, label='Train Corr', alpha=0.8, color='green')
-    ax2.plot(val_correlations, label='Val Corr', alpha=0.8, color='red')
-    ax2.set_xlabel('Epoch')
-    ax2.set_ylabel('Correlation')
-    ax2.set_title('相関係数の推移')
-    ax2.legend()
-    ax2.grid(True, alpha=0.3)
-    
-    # 3. 予測vs真値
-    ax3 = plt.subplot(3, 4, 3)
-    ax3.scatter(targets, predictions, alpha=0.5, s=20)
-    min_val = min(targets.min(), predictions.min())
-    max_val = max(targets.max(), predictions.max())
-    ax3.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2)
-    ax3.set_xlabel('真値 (CO)')
-    ax3.set_ylabel('予測値 (CO)')
-    ax3.set_title(f"MAE: {eval_results['mae']:.3f}, Corr: {eval_results['corr']:.3f}")
-    ax3.grid(True, alpha=0.3)
-    
-    # 4. 残差プロット
-    ax4 = plt.subplot(3, 4, 4)
-    residuals = targets - predictions
-    ax4.scatter(predictions, residuals, alpha=0.5, s=20)
-    ax4.axhline(y=0, color='r', linestyle='--', lw=2)
-    ax4.set_xlabel('予測値')
-    ax4.set_ylabel('残差')
-    ax4.set_title(f'平均: {residuals.mean():.3f}, STD: {residuals.std():.3f}')
-    ax4.grid(True, alpha=0.3)
-    
-    # 5. 時系列比較（長期）
-    ax5 = plt.subplot(3, 4, 5)
-    sample_range = min(180, len(targets))
-    ax5.plot(range(sample_range), targets[:sample_range], 'b-', label='真値', alpha=0.7)
-    ax5.plot(range(sample_range), predictions[:sample_range], 'r-', label='予測', alpha=0.7)
-    ax5.set_xlabel('時間 (秒)')
-    ax5.set_ylabel('CO値')
-    ax5.set_title('時系列比較（180秒）')
-    ax5.legend()
-    ax5.grid(True, alpha=0.3)
-    
-    # 6. 時系列比較（短期）
-    ax6 = plt.subplot(3, 4, 6)
-    start = 60
-    end = 90
-    ax6.plot(range(start, end), targets[start:end], 'b-', marker='o', markersize=3, label='真値')
-    ax6.plot(range(start, end), predictions[start:end], 'r-', marker='^', markersize=3, label='予測')
-    ax6.set_xlabel('時間 (秒)')
-    ax6.set_ylabel('CO値')
-    ax6.set_title('時系列詳細（60-90秒）')
-    ax6.legend()
-    ax6.grid(True, alpha=0.3)
-    
-    # 7. 誤差分布
-    ax7 = plt.subplot(3, 4, 7)
-    errors = np.abs(targets - predictions)
-    ax7.hist(errors, bins=30, edgecolor='black', alpha=0.7)
-    ax7.axvline(x=eval_results['mae'], color='r', linestyle='--', lw=2)
-    ax7.set_xlabel('絶対誤差')
-    ax7.set_ylabel('頻度')
-    ax7.set_title(f"誤差分布 (MAE: {eval_results['mae']:.3f})")
-    ax7.grid(True, alpha=0.3)
-    
-    # 8. タスク別性能
-    ax8 = plt.subplot(3, 4, 8)
-    task_maes = []
-    task_corrs = []
-    for i in range(6):
-        start = i * len(targets) // 6
-        end = (i + 1) * len(targets) // 6 if i < 5 else len(targets)
-        task_mae = mean_absolute_error(targets[start:end], predictions[start:end])
-        task_corr, _ = pearsonr(targets[start:end], predictions[start:end])
-        task_maes.append(task_mae)
-        task_corrs.append(task_corr)
-    
-    x = np.arange(6)
-    width = 0.35
-    ax8.bar(x - width/2, task_maes, width, label='MAE', alpha=0.7)
-    ax8_twin = ax8.twinx()
-    ax8_twin.bar(x + width/2, task_corrs, width, label='Corr', color='orange', alpha=0.7)
-    ax8.set_xlabel('タスク')
-    ax8.set_ylabel('MAE')
-    ax8_twin.set_ylabel('相関係数')
-    ax8.set_title('タスク別性能')
-    ax8.set_xticks(x)
-    ax8.set_xticklabels(config.tasks)
-    ax8.grid(True, alpha=0.3)
-    
-    # 9. Bland-Altmanプロット
-    ax9 = plt.subplot(3, 4, 9)
-    mean_vals = (targets + predictions) / 2
-    diff_vals = targets - predictions
-    mean_diff = np.mean(diff_vals)
-    std_diff = np.std(diff_vals)
-    
-    ax9.scatter(mean_vals, diff_vals, alpha=0.5, s=20)
-    ax9.axhline(y=mean_diff, color='red', linestyle='-', label=f'平均差: {mean_diff:.3f}')
-    ax9.axhline(y=mean_diff + 1.96*std_diff, color='red', linestyle='--')
-    ax9.axhline(y=mean_diff - 1.96*std_diff, color='red', linestyle='--')
-    ax9.set_xlabel('平均値')
-    ax9.set_ylabel('差分')
-    ax9.set_title('Bland-Altmanプロット')
-    ax9.legend()
-    ax9.grid(True, alpha=0.3)
-    
-    # 10. 相対誤差分布
-    ax10 = plt.subplot(3, 4, 10)
-    relative_errors = np.abs((targets - predictions) / (targets + 1e-8)) * 100
-    ax10.hist(relative_errors, bins=30, edgecolor='black', alpha=0.7)
-    ax10.axvline(x=np.mean(relative_errors), color='r', linestyle='--', lw=2,
-                 label=f'平均: {np.mean(relative_errors):.1f}%')
-    ax10.set_xlabel('相対誤差 (%)')
-    ax10.set_ylabel('頻度')
-    ax10.set_title('相対誤差分布')
-    ax10.legend()
-    ax10.grid(True, alpha=0.3)
-    
-    # 11. Q-Qプロット
-    ax11 = plt.subplot(3, 4, 11)
-    from scipy import stats
-    stats.probplot(residuals, dist="norm", plot=ax11)
-    ax11.set_title('Q-Qプロット（残差の正規性）')
-    ax11.grid(True, alpha=0.3)
-    
-    # 12. メトリクスサマリー
-    ax12 = plt.subplot(3, 4, 12)
-    ax12.axis('off')
-    summary_text = f"""
-    評価メトリクス
-    
-    MAE:     {eval_results['mae']:.4f}
-    RMSE:    {eval_results['rmse']:.4f}
-    相関係数: {eval_results['corr']:.4f}
-    R²:      {eval_results['r2']:.4f}
-    p値:     {eval_results['p_value']:.2e}
-    
-    データ拡張設定
-    使用: {'有効' if config.use_augmentation else '無効'}
-    ノイズ: {config.aug_noise_level}
-    スケール: {config.aug_scale_range}
-    Mixup α: {config.aug_mixup_alpha}
-    """
-    ax12.text(0.1, 0.5, summary_text, fontsize=10, verticalalignment='center',
-             fontfamily='monospace')
-    
-    aug_status = "with_aug" if config.use_augmentation else "no_aug"
-    plt.suptitle(f'PhysNet2DCNN - CO推定結果（データ拡張: {"有効" if config.use_augmentation else "無効"}）', 
-                fontsize=16, y=1.02)
-    plt.tight_layout()
-    
+def plot_individual_results(test_results, train_preds, train_targets, config):
     save_dir = Path(config.save_path)
     save_dir.mkdir(parents=True, exist_ok=True)
-    plt.savefig(save_dir / f'results_{aug_status}.png', dpi=150, bbox_inches='tight')
-    plt.show()
+    
+    # 1. テストデータの散布図
+    fig = plt.figure(figsize=(10, 8))
+    plt.scatter(test_results['targets'], test_results['predictions'], alpha=0.5, s=20)
+    min_val = min(test_results['targets'].min(), test_results['predictions'].min())
+    max_val = max(test_results['targets'].max(), test_results['predictions'].max())
+    plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2)
+    plt.xlabel('真値 (CO)')
+    plt.ylabel('予測値 (CO)')
+    plt.title(f"テストデータ - MAE: {test_results['mae']:.3f}, Corr: {test_results['corr']:.3f}")
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(save_dir / 'test_scatter.png', dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    # 2. トレーニングデータの散布図
+    fig = plt.figure(figsize=(10, 8))
+    train_corr = np.corrcoef(train_targets, train_preds)[0, 1]
+    train_mae = mean_absolute_error(train_targets, train_preds)
+    plt.scatter(train_targets, train_preds, alpha=0.5, s=20)
+    min_val = min(train_targets.min(), train_preds.min())
+    max_val = max(train_targets.max(), train_preds.max())
+    plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2)
+    plt.xlabel('真値 (CO)')
+    plt.ylabel('予測値 (CO)')
+    plt.title(f"トレーニングデータ - MAE: {train_mae:.3f}, Corr: {train_corr:.3f}")
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(save_dir / 'train_scatter.png', dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    # 3. 真値と予測値の波形図（タスクごとに赤線）
+    fig = plt.figure(figsize=(16, 8))
+    
+    # テストデータの波形
+    plt.subplot(2, 1, 1)
+    plt.plot(test_results['targets'], 'b-', label='真値', alpha=0.7, linewidth=1)
+    plt.plot(test_results['predictions'], 'g-', label='予測', alpha=0.7, linewidth=1)
+    
+    # タスクの境界に赤線を引く
+    for i in range(1, len(config.tasks)):
+        x_pos = i * len(test_results['targets']) // len(config.tasks)
+        plt.axvline(x=x_pos, color='r', linestyle='--', alpha=0.5)
+    
+    plt.xlabel('時間 (秒)')
+    plt.ylabel('CO値')
+    plt.title('テストデータ - 真値と予測値の波形')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    # トレーニングデータの波形
+    plt.subplot(2, 1, 2)
+    plt.plot(train_targets, 'b-', label='真値', alpha=0.7, linewidth=1)
+    plt.plot(train_preds, 'g-', label='予測', alpha=0.7, linewidth=1)
+    
+    # タスクの境界に赤線を引く
+    for i in range(1, len(config.tasks)):
+        x_pos = i * len(train_targets) // len(config.tasks)
+        plt.axvline(x=x_pos, color='r', linestyle='--', alpha=0.5)
+    
+    plt.xlabel('時間 (秒)')
+    plt.ylabel('CO値')
+    plt.title('トレーニングデータ - 真値と予測値の波形')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(save_dir / 'waveforms.png', dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    print(f"\n図を保存しました: {config.save_path}")
+    print(f"  - test_scatter.png")
+    print(f"  - train_scatter.png")
+    print(f"  - waveforms.png")
+
+# ================================
+# 交差検証（個人間）
+# ================================
+def cross_validation(rgb_data, co_data, subject_ids, config):
+    print("\n" + "="*60)
+    print(f"{config.n_folds}分割交差検証開始")
+    print("="*60)
+    
+    unique_subjects = sorted(list(set(subject_ids)))
+    subject_indices = {subj: [] for subj in unique_subjects}
+    for i, subj in enumerate(subject_ids):
+        subject_indices[subj].append(i)
+    
+    kf = KFold(n_splits=config.n_folds, shuffle=True, random_state=config.random_seed)
+    results = []
+    
+    for fold, (train_idx, test_idx) in enumerate(kf.split(unique_subjects)):
+        print(f"\nFold {fold+1}/{config.n_folds}")
+        
+        train_subjects = [unique_subjects[i] for i in train_idx]
+        test_subjects = [unique_subjects[i] for i in test_idx]
+        
+        # データ分割
+        train_indices = []
+        for subj in train_subjects:
+            train_indices.extend(subject_indices[subj])
+        test_indices = []
+        for subj in test_subjects:
+            test_indices.extend(subject_indices[subj])
+        
+        train_val_rgb = rgb_data[train_indices]
+        train_val_co = co_data[train_indices]
+        test_rgb = rgb_data[test_indices]
+        test_co = co_data[test_indices]
+        
+        # 訓練・検証分割
+        split_idx = int(len(train_val_rgb) * 0.8)
+        train_rgb = train_val_rgb[:split_idx]
+        train_co = train_val_co[:split_idx]
+        val_rgb = train_val_rgb[split_idx:]
+        val_co = train_val_co[split_idx:]
+        
+        # データローダー
+        train_dataset = CODataset(train_rgb, train_co, config.use_channel)
+        val_dataset = CODataset(val_rgb, val_co, config.use_channel)
+        test_dataset = CODataset(test_rgb, test_co, config.use_channel)
+        
+        train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True)
+        val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False)
+        test_loader = DataLoader(test_dataset, batch_size=config.batch_size, shuffle=False)
+        
+        # モデル作成と学習
+        model = PhysNet2DCNN(config.input_shape)
+        model, train_preds, train_targets = train_model(model, train_loader, val_loader, config, fold)
+        
+        # 評価
+        eval_results = evaluate_model(model, test_loader, config)
+        print(f"  結果 - MAE: {eval_results['mae']:.4f}, Corr: {eval_results['corr']:.4f}")
+        
+        results.append({
+            'fold': fold,
+            'mae': eval_results['mae'],
+            'corr': eval_results['corr'],
+            'predictions': eval_results['predictions'],
+            'targets': eval_results['targets'],
+            'train_predictions': train_preds,
+            'train_targets': train_targets
+        })
+    
+    return results
+
+# ================================
+# プロット（個人間）
+# ================================
+def plot_cross_results(results, config):
+    save_dir = Path(config.save_path)
+    save_dir.mkdir(parents=True, exist_ok=True)
+    
+    # 各Foldのテストデータ散布図
+    for r in results:
+        fig = plt.figure(figsize=(10, 8))
+        plt.scatter(r['targets'], r['predictions'], alpha=0.5, s=10)
+        min_val = min(r['targets'].min(), r['predictions'].min())
+        max_val = max(r['targets'].max(), r['predictions'].max())
+        plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2)
+        plt.xlabel('真値')
+        plt.ylabel('予測値')
+        plt.title(f"Fold {r['fold']+1} テストデータ - MAE: {r['mae']:.3f}, Corr: {r['corr']:.3f}")
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(save_dir / f'fold{r["fold"]+1}_test_scatter.png', dpi=150, bbox_inches='tight')
+        plt.close()
+    
+    # 各Foldのトレーニングデータ散布図
+    for r in results:
+        if r['train_predictions'] is not None and r['train_targets'] is not None:
+            fig = plt.figure(figsize=(10, 8))
+            train_mae = mean_absolute_error(r['train_targets'], r['train_predictions'])
+            train_corr = np.corrcoef(r['train_targets'], r['train_predictions'])[0, 1]
+            
+            plt.scatter(r['train_targets'], r['train_predictions'], alpha=0.5, s=10)
+            min_val = min(r['train_targets'].min(), r['train_predictions'].min())
+            max_val = max(r['train_targets'].max(), r['train_predictions'].max())
+            plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2)
+            plt.xlabel('真値')
+            plt.ylabel('予測値')
+            plt.title(f"Fold {r['fold']+1} トレーニングデータ - MAE: {train_mae:.3f}, Corr: {train_corr:.3f}")
+            plt.grid(True, alpha=0.3)
+            plt.tight_layout()
+            plt.savefig(save_dir / f'fold{r["fold"]+1}_train_scatter.png', dpi=150, bbox_inches='tight')
+            plt.close()
+    
+    # 全Foldのテストデータ統合散布図
+    fig = plt.figure(figsize=(10, 8))
+    all_test_targets = np.concatenate([r['targets'] for r in results])
+    all_test_predictions = np.concatenate([r['predictions'] for r in results])
+    overall_test_mae = mean_absolute_error(all_test_targets, all_test_predictions)
+    overall_test_corr, _ = pearsonr(all_test_targets, all_test_predictions)
+    
+    plt.scatter(all_test_targets, all_test_predictions, alpha=0.5, s=10)
+    min_val = min(all_test_targets.min(), all_test_predictions.min())
+    max_val = max(all_test_targets.max(), all_test_predictions.max())
+    plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2)
+    plt.xlabel('真値')
+    plt.ylabel('予測値')
+    plt.title(f'全Foldテストデータ - MAE: {overall_test_mae:.3f}, Corr: {overall_test_corr:.3f}')
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(save_dir / 'all_test_scatter.png', dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    # 全Foldのトレーニングデータ統合散布図
+    train_data_exists = [r for r in results if r['train_predictions'] is not None]
+    if train_data_exists:
+        fig = plt.figure(figsize=(10, 8))
+        all_train_targets = np.concatenate([r['train_targets'] for r in train_data_exists])
+        all_train_predictions = np.concatenate([r['train_predictions'] for r in train_data_exists])
+        overall_train_mae = mean_absolute_error(all_train_targets, all_train_predictions)
+        overall_train_corr, _ = pearsonr(all_train_targets, all_train_predictions)
+        
+        plt.scatter(all_train_targets, all_train_predictions, alpha=0.5, s=10)
+        min_val = min(all_train_targets.min(), all_train_predictions.min())
+        max_val = max(all_train_targets.max(), all_train_predictions.max())
+        plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2)
+        plt.xlabel('真値')
+        plt.ylabel('予測値')
+        plt.title(f'全Foldトレーニングデータ - MAE: {overall_train_mae:.3f}, Corr: {overall_train_corr:.3f}')
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(save_dir / 'all_train_scatter.png', dpi=150, bbox_inches='tight')
+        plt.close()
+    
+    print(f"\n図を保存しました: {config.save_path}")
+    print(f"  - 各Foldのテスト/トレーニング散布図")
+    print(f"  - 全体のテスト/トレーニング散布図")
+    
+    return overall_test_mae, overall_test_corr
 
 # ================================
 # メイン実行
@@ -892,18 +819,14 @@ def main():
     config = Config()
     
     print("\n" + "="*60)
-    print(" PhysNet2DCNN - CO推定モデル（データ拡張版）")
+    print(" PhysNet2DCNN - CO推定モデル")
     print("="*60)
     print(f"解析: {'個人内' if config.analysis_type == 'individual' else '個人間'}")
     print(f"チャンネル: {config.use_channel}")
-    print(f"データ拡張: {'有効' if config.use_augmentation else '無効'}")
-    if config.use_augmentation:
-        print(f"  - ノイズレベル: {config.aug_noise_level}")
-        print(f"  - スケール範囲: {config.aug_scale_range}")
-        print(f"  - Mixup α: {config.aug_mixup_alpha}")
-        print(f"  - CutMix確率: {config.aug_cutmix_prob}")
     print(f"損失関数: {config.loss_type}")
+    print(f"スケジューラー: {config.scheduler_type}")
     print(f"デバイス: {config.device}")
+    print(f"保存先: {config.save_path}")
     
     try:
         # データ読み込み
@@ -913,33 +836,20 @@ def main():
             # 個人内解析
             train_data, val_data, test_data = split_data_individual(rgb_data, co_data, config)
             
-            # データセット（訓練時のみデータ拡張を適用）
-            train_dataset = AugmentedCODataset(
-                train_data[0], train_data[1], 
-                config.use_channel, is_training=True, config=config
-            )
-            val_dataset = AugmentedCODataset(
-                val_data[0], val_data[1], 
-                config.use_channel, is_training=False, config=config
-            )
-            test_dataset = AugmentedCODataset(
-                test_data[0], test_data[1], 
-                config.use_channel, is_training=False, config=config
-            )
+            # データローダー
+            train_dataset = CODataset(train_data[0], train_data[1], config.use_channel)
+            val_dataset = CODataset(val_data[0], val_data[1], config.use_channel)
+            test_dataset = CODataset(test_data[0], test_data[1], config.use_channel)
             
-            train_loader = DataLoader(train_dataset, batch_size=config.batch_size, 
-                                    shuffle=True, num_workers=0)
-            val_loader = DataLoader(val_dataset, batch_size=config.batch_size, 
-                                  shuffle=False, num_workers=0)
-            test_loader = DataLoader(test_dataset, batch_size=config.batch_size, 
-                                   shuffle=False, num_workers=0)
+            train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True)
+            val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False)
+            test_loader = DataLoader(test_dataset, batch_size=config.batch_size, shuffle=False)
             
-            # モデル作成
+            # モデル学習
             model = PhysNet2DCNN(config.input_shape)
             print(f"\nモデルパラメータ数: {sum(p.numel() for p in model.parameters()):,}")
             
-            # 学習
-            model, train_losses, val_losses, train_corrs, val_corrs = train_model(
+            model, train_preds, train_targets = train_model(
                 model, train_loader, val_loader, config
             )
             
@@ -947,37 +857,25 @@ def main():
             print("\nテストデータで評価中...")
             eval_results = evaluate_model(model, test_loader, config)
             
-            print("\n" + "="*60)
-            print(" 最終結果")
-            print("="*60)
-            print(f"MAE:     {eval_results['mae']:.4f}")
-            print(f"RMSE:    {eval_results['rmse']:.4f}")
-            print(f"相関係数: {eval_results['corr']:.4f}")
-            print(f"R²:      {eval_results['r2']:.4f}")
-            print(f"p値:     {eval_results['p_value']:.2e}")
+            print("\n最終結果:")
+            print(f"  MAE: {eval_results['mae']:.4f}")
+            print(f"  RMSE: {eval_results['rmse']:.4f}")
+            print(f"  相関係数: {eval_results['corr']:.4f}")
+            print(f"  R²: {eval_results['r2']:.4f}")
             
             # プロット
-            plot_results(eval_results, train_losses, val_losses, 
-                       train_corrs, val_corrs, config)
+            plot_individual_results(eval_results, train_preds, train_targets, config)
             
-            # データ拡張なしでも評価（比較用）
-            if config.use_augmentation:
-                print("\n" + "="*60)
-                print(" データ拡張なしでの評価（比較用）")
-                print("="*60)
-                config_no_aug = Config()
-                config_no_aug.use_augmentation = False
-                test_dataset_no_aug = AugmentedCODataset(
-                    test_data[0], test_data[1], 
-                    config.use_channel, is_training=False, config=config_no_aug
-                )
-                test_loader_no_aug = DataLoader(test_dataset_no_aug, 
-                                               batch_size=config.batch_size, 
-                                               shuffle=False, num_workers=0)
-                eval_results_no_aug = evaluate_model(model, test_loader_no_aug, config_no_aug)
-                print(f"MAE（拡張なし）: {eval_results_no_aug['mae']:.4f}")
-                print(f"相関係数（拡張なし）: {eval_results_no_aug['corr']:.4f}")
+        else:
+            # 個人間解析
+            results = cross_validation(rgb_data, co_data, subject_ids, config)
+            overall_mae, overall_corr = plot_cross_results(results, config)
             
+            print("\n交差検証結果:")
+            for r in results:
+                print(f"  Fold {r['fold']+1}: MAE={r['mae']:.4f}, Corr={r['corr']:.4f}")
+            print(f"\n全体: MAE={overall_mae:.4f}, Corr={overall_corr:.4f}")
+        
         print("\n完了しました。")
         
     except Exception as e:
