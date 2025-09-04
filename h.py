@@ -42,17 +42,20 @@ class Config:
         self.tasks = ["t1-1", "t2", "t1-2", "t4", "t1-3", "t5"]
         self.task_duration = 60
         
-        # 時系列設定
-        self.temporal_window = 5  # 時間窓（前後のフレーム数）
-        self.use_temporal = True  # 時系列情報を使用するか
-        self.temporal_type = "lstm"  # "lstm", "gru", "attention", "conv1d"
+        # データ拡張設定
+        self.use_augmentation = True  # データ拡張を使用するか
+        self.aug_noise_level = 0.01  # ノイズレベル
+        self.aug_scale_range = (0.95, 1.05)  # スケーリング範囲
+        self.aug_brightness_range = (-0.05, 0.05)  # 明度変化範囲
+        self.aug_mixup_alpha = 0.2  # Mixupの強度
+        self.aug_cutmix_prob = 0.3  # CutMixの確率
         
         # 使用チャンネル
         self.use_channel = 'B'  # 'R', 'G', 'B', 'RGB'
         self.input_shape = (14, 16, 1 if self.use_channel != 'RGB' else 3)
         
         # 学習設定
-        self.batch_size = 8  # 時系列処理のためバッチサイズを小さく
+        self.batch_size = 16
         self.epochs = 100
         self.learning_rate = 0.001
         self.weight_decay = 1e-5
@@ -80,6 +83,106 @@ class Config:
         
         # 表示設定
         self.verbose = True
+
+# ================================
+# データ拡張関数
+# ================================
+class DataAugmentation:
+    """生理信号用のデータ拡張"""
+    
+    @staticmethod
+    def add_noise(rgb_data, noise_level=0.01):
+        """ガウシアンノイズを追加"""
+        noise = np.random.normal(0, noise_level, rgb_data.shape)
+        augmented = rgb_data + noise
+        return np.clip(augmented, 0, 1) if rgb_data.max() <= 1 else augmented
+    
+    @staticmethod
+    def scale_amplitude(rgb_data, co_data, scale_range=(0.95, 1.05)):
+        """振幅スケーリング（個人差をシミュレート）"""
+        scale_rgb = np.random.uniform(scale_range[0], scale_range[1])
+        scale_co = np.random.uniform(scale_range[0], scale_range[1])
+        return rgb_data * scale_rgb, co_data * scale_co
+    
+    @staticmethod
+    def brightness_adjust(rgb_data, brightness_range=(-0.05, 0.05)):
+        """明度調整（照明条件の変化をシミュレート）"""
+        brightness = np.random.uniform(brightness_range[0], brightness_range[1])
+        augmented = rgb_data + brightness
+        return np.clip(augmented, 0, 1) if rgb_data.max() <= 1 else augmented
+    
+    @staticmethod
+    def channel_shuffle(rgb_data):
+        """チャンネルシャッフル（RGBの順序をランダムに）"""
+        if rgb_data.shape[-1] == 3:
+            channels = [0, 1, 2]
+            np.random.shuffle(channels)
+            return rgb_data[:, :, :, channels]
+        return rgb_data
+    
+    @staticmethod
+    def mixup(rgb1, co1, rgb2, co2, alpha=0.2):
+        """Mixup augmentation"""
+        lam = np.random.beta(alpha, alpha)
+        mixed_rgb = lam * rgb1 + (1 - lam) * rgb2
+        mixed_co = lam * co1 + (1 - lam) * co2
+        return mixed_rgb, mixed_co
+    
+    @staticmethod
+    def cutmix(rgb1, co1, rgb2, co2, prob=0.5):
+        """CutMix augmentation"""
+        if np.random.rand() > prob:
+            return rgb1, co1
+        
+        H, W = rgb1.shape[0], rgb1.shape[1]
+        lam = np.random.beta(1.0, 1.0)
+        
+        cut_rat = np.sqrt(1. - lam)
+        cut_h = int(H * cut_rat)
+        cut_w = int(W * cut_rat)
+        
+        cx = np.random.randint(W)
+        cy = np.random.randint(H)
+        
+        bbx1 = np.clip(cx - cut_w // 2, 0, W)
+        bby1 = np.clip(cy - cut_h // 2, 0, H)
+        bbx2 = np.clip(cx + cut_w // 2, 0, W)
+        bby2 = np.clip(cy + cut_h // 2, 0, H)
+        
+        mixed_rgb = rgb1.copy()
+        mixed_rgb[bby1:bby2, bbx1:bbx2] = rgb2[bby1:bby2, bbx1:bbx2]
+        
+        # CO値も面積比に応じて混合
+        lam = 1 - ((bbx2 - bbx1) * (bby2 - bby1) / (H * W))
+        mixed_co = lam * co1 + (1 - lam) * co2
+        
+        return mixed_rgb, mixed_co
+    
+    @staticmethod
+    def random_erasing(rgb_data, prob=0.3, area_range=(0.02, 0.1)):
+        """Random Erasing（一部領域をマスク）"""
+        if np.random.rand() > prob:
+            return rgb_data
+        
+        H, W = rgb_data.shape[0], rgb_data.shape[1]
+        area = H * W
+        
+        target_area = np.random.uniform(area_range[0], area_range[1]) * area
+        aspect_ratio = np.random.uniform(0.3, 3.3)
+        
+        h = int(np.sqrt(target_area * aspect_ratio))
+        w = int(np.sqrt(target_area / aspect_ratio))
+        
+        if h < H and w < W:
+            y = np.random.randint(0, H - h)
+            x = np.random.randint(0, W - w)
+            
+            augmented = rgb_data.copy()
+            # ランダム値で埋める
+            augmented[y:y+h, x:x+w] = np.random.uniform(0, 1, (h, w, rgb_data.shape[2]))
+            return augmented
+        
+        return rgb_data
 
 # ================================
 # カスタム損失関数
@@ -130,64 +233,80 @@ class HuberCorrelationLoss(nn.Module):
         return total_loss, huber_loss, corr_loss
 
 # ================================
-# データセット（時系列対応）
+# データセット（データ拡張対応）
 # ================================
-class TemporalCODataset(Dataset):
-    def __init__(self, rgb_data, co_data, temporal_window=5, use_channel='B'):
-        self.temporal_window = temporal_window
+class AugmentedCODataset(Dataset):
+    def __init__(self, rgb_data, co_data, use_channel='B', 
+                 is_training=False, config=None):
+        self.is_training = is_training
+        self.config = config
+        self.augmentor = DataAugmentation()
         
         # チャンネル選択
         if use_channel == 'R':
-            selected_data = rgb_data[:, :, :, 0:1]
+            self.rgb_data = rgb_data[:, :, :, 0:1]
         elif use_channel == 'G':
-            selected_data = rgb_data[:, :, :, 1:2]
+            self.rgb_data = rgb_data[:, :, :, 1:2]
         elif use_channel == 'B':
-            selected_data = rgb_data[:, :, :, 2:3]
+            self.rgb_data = rgb_data[:, :, :, 2:3]
         else:
-            selected_data = rgb_data
+            self.rgb_data = rgb_data
         
-        self.rgb_data = torch.FloatTensor(selected_data).permute(0, 3, 1, 2)
-        self.co_data = torch.FloatTensor(co_data)
-        
-        # 時系列データの作成
-        self.temporal_indices = []
-        for i in range(len(self.rgb_data)):
-            # 時間窓内のインデックスを取得（境界処理あり）
-            indices = []
-            for j in range(-temporal_window, temporal_window + 1):
-                idx = i + j
-                # 境界処理：クリッピング
-                idx = max(0, min(len(self.rgb_data) - 1, idx))
-                indices.append(idx)
-            self.temporal_indices.append(indices)
+        self.co_data = co_data
+        self.indices = list(range(len(self.rgb_data)))
     
     def __len__(self):
         return len(self.rgb_data)
     
     def __getitem__(self, idx):
-        # 時間窓内のフレームを取得
-        indices = self.temporal_indices[idx]
-        temporal_rgb = self.rgb_data[indices]  # (T, C, H, W)
+        rgb = self.rgb_data[idx].copy()
+        co = self.co_data[idx].copy()
         
-        # 中心フレームのCO値
-        co = self.co_data[idx]
+        # 訓練時のみデータ拡張を適用
+        if self.is_training and self.config and self.config.use_augmentation:
+            # ランダムにデータ拡張を適用
+            if np.random.rand() < 0.5:
+                rgb = self.augmentor.add_noise(rgb, self.config.aug_noise_level)
+            
+            if np.random.rand() < 0.3:
+                rgb, co = self.augmentor.scale_amplitude(rgb, co, self.config.aug_scale_range)
+            
+            if np.random.rand() < 0.3:
+                rgb = self.augmentor.brightness_adjust(rgb, self.config.aug_brightness_range)
+            
+            if np.random.rand() < 0.2:
+                rgb = self.augmentor.random_erasing(rgb, prob=0.5)
+            
+            # Mixup or CutMix（別のサンプルとの混合）
+            if np.random.rand() < 0.3 and len(self.indices) > 1:
+                # ランダムに別のサンプルを選択
+                idx2 = np.random.choice([i for i in self.indices if i != idx])
+                rgb2 = self.rgb_data[idx2]
+                co2 = self.co_data[idx2]
+                
+                if np.random.rand() < 0.5:
+                    rgb, co = self.augmentor.mixup(rgb, co, rgb2, co2, 
+                                                  self.config.aug_mixup_alpha)
+                else:
+                    rgb, co = self.augmentor.cutmix(rgb, co, rgb2, co2, 
+                                                   self.config.aug_cutmix_prob)
         
-        return temporal_rgb, co
+        # Tensorに変換
+        rgb_tensor = torch.FloatTensor(rgb).permute(2, 0, 1)  # (H,W,C) -> (C,H,W)
+        co_tensor = torch.FloatTensor([co])
+        
+        return rgb_tensor, co_tensor.squeeze()
 
 # ================================
-# Temporal PhysNet2DCNNモデル
+# PhysNet2DCNNモデル
 # ================================
-class TemporalPhysNet2DCNN(nn.Module):
-    def __init__(self, input_shape, temporal_window=5, temporal_type="lstm"):
-        super(TemporalPhysNet2DCNN, self).__init__()
-        
-        self.temporal_window = temporal_window
-        self.temporal_type = temporal_type
-        self.temporal_size = 2 * temporal_window + 1  # 前後+中心
+class PhysNet2DCNN(nn.Module):
+    def __init__(self, input_shape):
+        super(PhysNet2DCNN, self).__init__()
         
         in_channels = input_shape[2]
         
-        # Spatial Feature Extraction (PhysNet部分)
+        # ConvBlock 1
         self.conv_block1 = nn.Sequential(
             nn.Conv1d(in_channels, 32, kernel_size=5, padding=2),
             nn.BatchNorm1d(32),
@@ -198,6 +317,7 @@ class TemporalPhysNet2DCNN(nn.Module):
         )
         self.avgpool1 = nn.AvgPool1d(kernel_size=2, stride=2)
         
+        # ConvBlock 2
         self.conv_block2 = nn.Sequential(
             nn.Conv1d(32, 64, kernel_size=3, padding=1),
             nn.BatchNorm1d(64),
@@ -208,6 +328,7 @@ class TemporalPhysNet2DCNN(nn.Module):
         )
         self.avgpool2 = nn.AvgPool1d(kernel_size=2, stride=2)
         
+        # ConvBlock 3
         self.conv_block3 = nn.Sequential(
             nn.Conv1d(64, 64, kernel_size=3, padding=1),
             nn.BatchNorm1d(64),
@@ -218,6 +339,7 @@ class TemporalPhysNet2DCNN(nn.Module):
         )
         self.avgpool3 = nn.AvgPool1d(kernel_size=2, stride=2)
         
+        # ConvBlock 4
         self.conv_block4 = nn.Sequential(
             nn.Conv1d(64, 64, kernel_size=3, padding=1),
             nn.BatchNorm1d(64),
@@ -228,6 +350,7 @@ class TemporalPhysNet2DCNN(nn.Module):
         )
         self.avgpool4 = nn.AvgPool1d(kernel_size=2, stride=2)
         
+        # ConvBlock 5
         self.conv_block5 = nn.Sequential(
             nn.Conv1d(64, 64, kernel_size=3, padding=1),
             nn.BatchNorm1d(64),
@@ -237,63 +360,23 @@ class TemporalPhysNet2DCNN(nn.Module):
             nn.ELU()
         )
         
+        # Global Average Pooling
         self.global_avgpool = nn.AdaptiveAvgPool1d(1)
         
-        # Temporal Processing
-        self.feature_dim = 64
+        # Final Convolution
+        self.conv_final = nn.Conv1d(64, 1, kernel_size=1)
         
-        if temporal_type == "lstm":
-            self.temporal = nn.LSTM(self.feature_dim, 32, 
-                                   num_layers=2, batch_first=True, 
-                                   bidirectional=True, dropout=0.2)
-            self.temporal_out_dim = 64  # bidirectional
-        elif temporal_type == "gru":
-            self.temporal = nn.GRU(self.feature_dim, 32, 
-                                  num_layers=2, batch_first=True, 
-                                  bidirectional=True, dropout=0.2)
-            self.temporal_out_dim = 64
-        elif temporal_type == "attention":
-            self.temporal = TemporalAttention(self.feature_dim, num_heads=4)
-            self.temporal_out_dim = self.feature_dim
-        else:  # conv1d
-            self.temporal = nn.Sequential(
-                nn.Conv1d(self.temporal_size, 16, kernel_size=3, padding=1),
-                nn.BatchNorm1d(16),
-                nn.ReLU(),
-                nn.Conv1d(16, 8, kernel_size=3, padding=1),
-                nn.BatchNorm1d(8),
-                nn.ReLU(),
-                nn.Conv1d(8, 1, kernel_size=1)
-            )
-            self.temporal_out_dim = self.feature_dim
-        
-        # Final layers
-        if temporal_type in ["lstm", "gru", "attention"]:
-            self.final_fc = nn.Sequential(
-                nn.Linear(self.temporal_out_dim, 32),
-                nn.ReLU(),
-                nn.Dropout(0.3),
-                nn.Linear(32, 1)
-            )
-        else:
-            self.final_fc = nn.Sequential(
-                nn.Linear(self.feature_dim, 32),
-                nn.ReLU(),
-                nn.Dropout(0.3),
-                nn.Linear(32, 1)
-            )
-        
+        # Dropout
         self.dropout = nn.Dropout(0.2)
         
-    def extract_features(self, x):
-        """単一フレームから特徴抽出"""
+    def forward(self, x):
         batch_size = x.size(0)
         in_channels = x.size(1)
         
-        # (B, C, H, W) -> (B, C, H*W)
+        # (B, C, H, W) -> (B, C, H*W=224)
         x = x.view(batch_size, in_channels, -1)
         
-        # PhysNet feature extraction
+        # PhysNet blocks
         x = self.conv_block1(x)
         x = self.avgpool1(x)
         x = self.dropout(x)
@@ -311,77 +394,14 @@ class TemporalPhysNet2DCNN(nn.Module):
         x = self.dropout(x)
         
         x = self.conv_block5(x)
+        
+        # Global pooling and output
         x = self.global_avgpool(x)
+        x = self.conv_final(x)
         
-        # (B, 64, 1) -> (B, 64)
-        x = x.squeeze(-1)
-        
-        return x
-    
-    def forward(self, x):
-        # x: (B, T, C, H, W)
-        batch_size = x.size(0)
-        temporal_size = x.size(1)
-        
-        # 各時間ステップで特徴抽出
-        features = []
-        for t in range(temporal_size):
-            feat = self.extract_features(x[:, t, :, :, :])
-            features.append(feat)
-        
-        features = torch.stack(features, dim=1)  # (B, T, 64)
-        
-        # Temporal processing
-        if self.temporal_type in ["lstm", "gru"]:
-            temporal_out, _ = self.temporal(features)
-            # 中心フレームの出力を使用
-            center_idx = temporal_size // 2
-            out = temporal_out[:, center_idx, :]
-        elif self.temporal_type == "attention":
-            out = self.temporal(features)
-            # 中心フレームの出力
-            center_idx = temporal_size // 2
-            out = out[:, center_idx, :]
-        else:  # conv1d
-            # (B, T, F) -> (B, T, F) for conv1d
-            features = features.permute(0, 1, 2)  # Keep shape
-            out = self.temporal(features)  # (B, 1, F)
-            out = out.squeeze(1)  # (B, F)
-        
-        # Final output
-        out = self.final_fc(out)
-        out = out.squeeze()
-        
+        x = x.squeeze()
         if batch_size == 1:
-            out = out.unsqueeze(0)
-        
-        return out
-
-# ================================
-# Temporal Attention Module
-# ================================
-class TemporalAttention(nn.Module):
-    def __init__(self, feature_dim, num_heads=4):
-        super(TemporalAttention, self).__init__()
-        self.attention = nn.MultiheadAttention(feature_dim, num_heads, 
-                                              dropout=0.1, batch_first=True)
-        self.norm = nn.LayerNorm(feature_dim)
-        self.ffn = nn.Sequential(
-            nn.Linear(feature_dim, feature_dim * 4),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(feature_dim * 4, feature_dim)
-        )
-        self.norm2 = nn.LayerNorm(feature_dim)
-    
-    def forward(self, x):
-        # Self-attention
-        attn_out, _ = self.attention(x, x, x)
-        x = self.norm(x + attn_out)
-        
-        # Feed-forward
-        ffn_out = self.ffn(x)
-        x = self.norm2(x + ffn_out)
+            x = x.unsqueeze(0)
         
         return x
 
@@ -396,6 +416,9 @@ def load_data_single_subject(subject, config):
         return None, None
     
     rgb_data = np.load(rgb_path)
+    # 正規化（0-1の範囲に）
+    if rgb_data.max() > 1:
+        rgb_data = (rgb_data - rgb_data.min()) / (rgb_data.max() - rgb_data.min())
     
     co_data_list = []
     for task in config.tasks:
@@ -436,7 +459,7 @@ def load_all_data(config):
     print(f"  被験者数: {len(config.subjects)}")
     print(f"  データ形状: {all_rgb_data.shape}")
     print(f"  使用チャンネル: {config.use_channel}成分")
-    print(f"  時間窓: ±{config.temporal_window}フレーム")
+    print(f"  データ拡張: {'有効' if config.use_augmentation else '無効'}")
     
     return all_rgb_data, all_co_data, all_subject_ids
 
@@ -551,6 +574,8 @@ def train_model(model, train_loader, val_loader, config, fold=None):
     best_val_loss = float('inf')
     best_val_corr = -1
     patience_counter = 0
+    
+    print(f"  データ拡張: {'有効' if config.use_augmentation else '無効'}")
     
     for epoch in range(config.epochs):
         # 学習
@@ -738,23 +763,23 @@ def plot_results(eval_results, train_losses, val_losses,
     # 5. 時系列比較（長期）
     ax5 = plt.subplot(3, 4, 5)
     sample_range = min(180, len(targets))
-    ax5.plot(range(sample_range), targets[:sample_range], 'b-', label='真値', alpha=0.7, linewidth=0.8)
-    ax5.plot(range(sample_range), predictions[:sample_range], 'r-', label='予測', alpha=0.7, linewidth=0.8)
+    ax5.plot(range(sample_range), targets[:sample_range], 'b-', label='真値', alpha=0.7)
+    ax5.plot(range(sample_range), predictions[:sample_range], 'r-', label='予測', alpha=0.7)
     ax5.set_xlabel('時間 (秒)')
     ax5.set_ylabel('CO値')
     ax5.set_title('時系列比較（180秒）')
     ax5.legend()
     ax5.grid(True, alpha=0.3)
     
-    # 6. 時系列比較（短期・詳細）
+    # 6. 時系列比較（短期）
     ax6 = plt.subplot(3, 4, 6)
     start = 60
     end = 90
-    ax6.plot(range(start, end), targets[start:end], 'b-', marker='o', markersize=3, label='真値', alpha=0.7)
-    ax6.plot(range(start, end), predictions[start:end], 'r-', marker='^', markersize=3, label='予測', alpha=0.7)
+    ax6.plot(range(start, end), targets[start:end], 'b-', marker='o', markersize=3, label='真値')
+    ax6.plot(range(start, end), predictions[start:end], 'r-', marker='^', markersize=3, label='予測')
     ax6.set_xlabel('時間 (秒)')
     ax6.set_ylabel('CO値')
-    ax6.set_title('時系列詳細比較（60-90秒）')
+    ax6.set_title('時系列詳細（60-90秒）')
     ax6.legend()
     ax6.grid(True, alpha=0.3)
     
@@ -762,12 +787,10 @@ def plot_results(eval_results, train_losses, val_losses,
     ax7 = plt.subplot(3, 4, 7)
     errors = np.abs(targets - predictions)
     ax7.hist(errors, bins=30, edgecolor='black', alpha=0.7)
-    ax7.axvline(x=eval_results['mae'], color='r', linestyle='--', lw=2, 
-                label=f"MAE: {eval_results['mae']:.3f}")
+    ax7.axvline(x=eval_results['mae'], color='r', linestyle='--', lw=2)
     ax7.set_xlabel('絶対誤差')
     ax7.set_ylabel('頻度')
-    ax7.set_title('絶対誤差分布')
-    ax7.legend()
+    ax7.set_title(f"誤差分布 (MAE: {eval_results['mae']:.3f})")
     ax7.grid(True, alpha=0.3)
     
     # 8. タスク別性能
@@ -784,12 +807,12 @@ def plot_results(eval_results, train_losses, val_losses,
     
     x = np.arange(6)
     width = 0.35
-    ax8.bar(x - width/2, task_maes, width, label='MAE', alpha=0.7, color='blue')
+    ax8.bar(x - width/2, task_maes, width, label='MAE', alpha=0.7)
     ax8_twin = ax8.twinx()
     ax8_twin.bar(x + width/2, task_corrs, width, label='Corr', color='orange', alpha=0.7)
     ax8.set_xlabel('タスク')
-    ax8.set_ylabel('MAE', color='blue')
-    ax8_twin.set_ylabel('相関係数', color='orange')
+    ax8.set_ylabel('MAE')
+    ax8_twin.set_ylabel('相関係数')
     ax8.set_title('タスク別性能')
     ax8.set_xticks(x)
     ax8.set_xticklabels(config.tasks)
@@ -804,29 +827,23 @@ def plot_results(eval_results, train_losses, val_losses,
     
     ax9.scatter(mean_vals, diff_vals, alpha=0.5, s=20)
     ax9.axhline(y=mean_diff, color='red', linestyle='-', label=f'平均差: {mean_diff:.3f}')
-    ax9.axhline(y=mean_diff + 1.96*std_diff, color='red', linestyle='--', 
-                label=f'±1.96SD')
+    ax9.axhline(y=mean_diff + 1.96*std_diff, color='red', linestyle='--')
     ax9.axhline(y=mean_diff - 1.96*std_diff, color='red', linestyle='--')
-    ax9.set_xlabel('平均値 (真値+予測値)/2')
-    ax9.set_ylabel('差分 (真値-予測値)')
+    ax9.set_xlabel('平均値')
+    ax9.set_ylabel('差分')
     ax9.set_title('Bland-Altmanプロット')
     ax9.legend()
     ax9.grid(True, alpha=0.3)
     
-    # 10. 相関の時間変化
+    # 10. 相対誤差分布
     ax10 = plt.subplot(3, 4, 10)
-    window_size = 30
-    rolling_corrs = []
-    for i in range(len(targets) - window_size):
-        window_corr, _ = pearsonr(targets[i:i+window_size], 
-                                  predictions[i:i+window_size])
-        rolling_corrs.append(window_corr)
-    ax10.plot(rolling_corrs, alpha=0.7)
-    ax10.set_xlabel('時間窓の開始位置')
-    ax10.set_ylabel('相関係数')
-    ax10.set_title(f'相関係数の時間変化（窓サイズ: {window_size}秒）')
-    ax10.axhline(y=eval_results['corr'], color='r', linestyle='--', 
-                 label=f'全体相関: {eval_results["corr"]:.3f}')
+    relative_errors = np.abs((targets - predictions) / (targets + 1e-8)) * 100
+    ax10.hist(relative_errors, bins=30, edgecolor='black', alpha=0.7)
+    ax10.axvline(x=np.mean(relative_errors), color='r', linestyle='--', lw=2,
+                 label=f'平均: {np.mean(relative_errors):.1f}%')
+    ax10.set_xlabel('相対誤差 (%)')
+    ax10.set_ylabel('頻度')
+    ax10.set_title('相対誤差分布')
     ax10.legend()
     ax10.grid(True, alpha=0.3)
     
@@ -849,22 +866,23 @@ def plot_results(eval_results, train_losses, val_losses,
     R²:      {eval_results['r2']:.4f}
     p値:     {eval_results['p_value']:.2e}
     
-    モデル設定
-    時系列: {config.temporal_type}
-    時間窓: ±{config.temporal_window}
-    損失: {config.loss_type}
+    データ拡張設定
+    使用: {'有効' if config.use_augmentation else '無効'}
+    ノイズ: {config.aug_noise_level}
+    スケール: {config.aug_scale_range}
+    Mixup α: {config.aug_mixup_alpha}
     """
-    ax12.text(0.1, 0.5, summary_text, fontsize=11, verticalalignment='center',
+    ax12.text(0.1, 0.5, summary_text, fontsize=10, verticalalignment='center',
              fontfamily='monospace')
     
-    plt.suptitle(f'Temporal PhysNet2DCNN - CO推定結果（{config.temporal_type.upper()}）', 
+    aug_status = "with_aug" if config.use_augmentation else "no_aug"
+    plt.suptitle(f'PhysNet2DCNN - CO推定結果（データ拡張: {"有効" if config.use_augmentation else "無効"}）', 
                 fontsize=16, y=1.02)
     plt.tight_layout()
     
     save_dir = Path(config.save_path)
     save_dir.mkdir(parents=True, exist_ok=True)
-    plt.savefig(save_dir / f'results_temporal_{config.temporal_type}.png', 
-                dpi=150, bbox_inches='tight')
+    plt.savefig(save_dir / f'results_{aug_status}.png', dpi=150, bbox_inches='tight')
     plt.show()
 
 # ================================
@@ -874,11 +892,16 @@ def main():
     config = Config()
     
     print("\n" + "="*60)
-    print(" Temporal PhysNet2DCNN - CO推定モデル")
+    print(" PhysNet2DCNN - CO推定モデル（データ拡張版）")
     print("="*60)
-    print(f"時系列処理: {config.temporal_type.upper()}")
-    print(f"時間窓: ±{config.temporal_window}フレーム")
+    print(f"解析: {'個人内' if config.analysis_type == 'individual' else '個人間'}")
     print(f"チャンネル: {config.use_channel}")
+    print(f"データ拡張: {'有効' if config.use_augmentation else '無効'}")
+    if config.use_augmentation:
+        print(f"  - ノイズレベル: {config.aug_noise_level}")
+        print(f"  - スケール範囲: {config.aug_scale_range}")
+        print(f"  - Mixup α: {config.aug_mixup_alpha}")
+        print(f"  - CutMix確率: {config.aug_cutmix_prob}")
     print(f"損失関数: {config.loss_type}")
     print(f"デバイス: {config.device}")
     
@@ -890,13 +913,19 @@ def main():
             # 個人内解析
             train_data, val_data, test_data = split_data_individual(rgb_data, co_data, config)
             
-            # 時系列データセット
-            train_dataset = TemporalCODataset(train_data[0], train_data[1], 
-                                             config.temporal_window, config.use_channel)
-            val_dataset = TemporalCODataset(val_data[0], val_data[1], 
-                                           config.temporal_window, config.use_channel)
-            test_dataset = TemporalCODataset(test_data[0], test_data[1], 
-                                            config.temporal_window, config.use_channel)
+            # データセット（訓練時のみデータ拡張を適用）
+            train_dataset = AugmentedCODataset(
+                train_data[0], train_data[1], 
+                config.use_channel, is_training=True, config=config
+            )
+            val_dataset = AugmentedCODataset(
+                val_data[0], val_data[1], 
+                config.use_channel, is_training=False, config=config
+            )
+            test_dataset = AugmentedCODataset(
+                test_data[0], test_data[1], 
+                config.use_channel, is_training=False, config=config
+            )
             
             train_loader = DataLoader(train_dataset, batch_size=config.batch_size, 
                                     shuffle=True, num_workers=0)
@@ -906,9 +935,7 @@ def main():
                                    shuffle=False, num_workers=0)
             
             # モデル作成
-            model = TemporalPhysNet2DCNN(config.input_shape, 
-                                        config.temporal_window, 
-                                        config.temporal_type)
+            model = PhysNet2DCNN(config.input_shape)
             print(f"\nモデルパラメータ数: {sum(p.numel() for p in model.parameters()):,}")
             
             # 学習
@@ -932,6 +959,24 @@ def main():
             # プロット
             plot_results(eval_results, train_losses, val_losses, 
                        train_corrs, val_corrs, config)
+            
+            # データ拡張なしでも評価（比較用）
+            if config.use_augmentation:
+                print("\n" + "="*60)
+                print(" データ拡張なしでの評価（比較用）")
+                print("="*60)
+                config_no_aug = Config()
+                config_no_aug.use_augmentation = False
+                test_dataset_no_aug = AugmentedCODataset(
+                    test_data[0], test_data[1], 
+                    config.use_channel, is_training=False, config=config_no_aug
+                )
+                test_loader_no_aug = DataLoader(test_dataset_no_aug, 
+                                               batch_size=config.batch_size, 
+                                               shuffle=False, num_workers=0)
+                eval_results_no_aug = evaluate_model(model, test_loader_no_aug, config_no_aug)
+                print(f"MAE（拡張なし）: {eval_results_no_aug['mae']:.4f}")
+                print(f"相関係数（拡張なし）: {eval_results_no_aug['corr']:.4f}")
             
         print("\n完了しました。")
         
