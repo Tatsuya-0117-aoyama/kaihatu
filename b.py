@@ -1,211 +1,229 @@
 import numpy as np
-import matplotlib.pyplot as plt
 import os
+import matplotlib.pyplot as plt
 from scipy.signal import find_peaks, correlate
 from scipy.stats import pearsonr
 import warnings
 warnings.filterwarnings('ignore')
 
 def extract_rgb_features(rgb_data):
-    """RGB信号から特徴量（平均値の時系列）を抽出"""
-    # 各フレームのRGB平均値を計算
-    rgb_mean = np.mean(rgb_data, axis=(1, 2, 3))  # (11402,)
-    return rgb_mean
+    """RGB信号から特徴量を抽出（平均輝度の時系列）"""
+    # RGBチャネルの平均を計算 (frames, h, w, 3) -> (frames,)
+    mean_intensity = np.mean(rgb_data, axis=(1, 2, 3))
+    
+    # ピークを検出
+    peaks, _ = find_peaks(mean_intensity, distance=20)
+    
+    return mean_intensity, peaks
 
-def extract_hemodynamic_features(signals_path, subject, param='CO'):
-    """血行動態パラメータを時系列として結合"""
-    tasks = ['t1-1', 't2', 't1-2', 't4', 't1-3', 't5']
-    hemodynamic_data = []
-    
-    param_path = os.path.join(signals_path, subject, param)
-    
-    for task in tasks:
-        file_name = f"{param}_62_{task}.npy"
-        file_path = os.path.join(param_path, file_name)
-        
-        if os.path.exists(file_path):
-            data = np.load(file_path)
-            hemodynamic_data.append(data)
-        else:
-            # ファイルが存在しない場合はゼロで埋める
-            hemodynamic_data.append(np.zeros(60))
-    
-    # 全タスクを結合（360秒分）
-    return np.concatenate(hemodynamic_data)
+def extract_hemodynamic_features(hemo_data, param_name):
+    """血行動態データから特徴量を抽出"""
+    # パラメータによって特徴抽出方法を変える
+    if param_name in ['CO', 'SV', 'HR_CO_SV']:
+        # これらは重要な血行動態指標
+        return hemo_data
+    else:
+        return hemo_data
 
-def find_optimal_lag(rgb_features, hemodynamic_features, max_lag=1000):
-    """相関が最大となる時間遅れを推定"""
-    # RGB信号をリサンプリング（11402点から360点へ）
-    # 約31.67点ごとに1点サンプリング
-    sampling_rate = len(rgb_features) / 360
-    rgb_resampled = rgb_features[::int(sampling_rate)][:360]
+def find_optimal_lag(rgb_features, hemo_features, max_lag=1000):
+    """相互相関により最適な時間遅れを推定"""
+    # 正規化
+    rgb_norm = (rgb_features - np.mean(rgb_features)) / (np.std(rgb_features) + 1e-8)
+    hemo_norm = (hemo_features - np.mean(hemo_features)) / (np.std(hemo_features) + 1e-8)
+    
+    # ヘモダイナミクスデータを30Hzにアップサンプリング（線形補間）
+    hemo_upsampled = np.interp(
+        np.linspace(0, len(hemo_norm)-1, len(hemo_norm)*30),
+        np.arange(len(hemo_norm)),
+        hemo_norm
+    )
+    
+    # RGB信号の長さに合わせる
+    if len(hemo_upsampled) < len(rgb_norm):
+        hemo_upsampled = np.pad(hemo_upsampled, (0, len(rgb_norm) - len(hemo_upsampled)), 'edge')
+    else:
+        hemo_upsampled = hemo_upsampled[:len(rgb_norm)]
     
     # 相互相関を計算
-    correlation = correlate(rgb_resampled, hemodynamic_features, mode='full')
+    correlation = correlate(rgb_norm, hemo_upsampled, mode='same')
     
-    # 最大相関のラグを見つける
-    lags = np.arange(-len(hemodynamic_features) + 1, len(rgb_resampled))
-    max_corr_idx = np.argmax(np.abs(correlation))
-    optimal_lag = lags[max_corr_idx]
+    # 最大相関の位置を見つける
+    lag = np.argmax(np.abs(correlation)) - len(rgb_norm) // 2
     
-    # 元のサンプリングレートに変換
-    optimal_lag_frames = int(optimal_lag * sampling_rate)
+    # 妥当な範囲に制限
+    lag = np.clip(lag, -max_lag, max_lag)
     
-    return optimal_lag_frames
+    return lag, np.max(np.abs(correlation))
 
-def process_subject(subject_id, eye_below_path, signals_path, output_path, graph_path):
-    """1人の被験者データを処理"""
-    print(f"\n処理中: {subject_id}")
+def process_subject(subject_id):
+    """各被験者のデータを処理"""
+    print(f"Processing {subject_id}...")
     
-    # RGB信号を読み込み
-    rgb_file = os.path.join(eye_below_path, subject_id, f"{subject_id}_downsampled_1Hz.npy")
-    if not os.path.exists(rgb_file):
-        print(f"  RGBファイルが見つかりません: {rgb_file}")
-        return
+    # パス設定
+    rgb_path = f"C:\\Users\\EyeBelow\\{subject_id}\\{subject_id}_downsampled_1Hz.npy"
+    hemo_base_path = f"C:\\Users\\Data signals_bp\\{subject_id}"
+    output_path = f"C:\\Users\\EyeBelow\\{subject_id}\\{subject_id}_downsampled_1Hzver2.npy"
+    graph_output_dir = "C:\\ダウンサンプリング後のRGB信号ver2"
     
-    rgb_data = np.load(rgb_file)
-    print(f"  元のRGBデータ形状: {rgb_data.shape}")
+    # 出力ディレクトリの作成
+    os.makedirs(graph_output_dir, exist_ok=True)
     
-    # RGB特徴量を抽出
-    rgb_features = extract_rgb_features(rgb_data)
-    
-    # 複数の血行動態パラメータで時間遅れを推定
-    params_to_check = ['CO', 'HR_CO_SV_T', 'SV', 'reMAP']
-    lags = []
-    
-    for param in params_to_check:
-        try:
-            hemodynamic_features = extract_hemodynamic_features(signals_path, subject_id, param)
-            lag = find_optimal_lag(rgb_features, hemodynamic_features)
-            lags.append(lag)
-            print(f"  {param}での時間遅れ: {lag}フレーム")
-        except Exception as e:
-            print(f"  {param}の処理でエラー: {e}")
-            continue
-    
-    # 平均的な時間遅れを使用（外れ値を除外）
-    if lags:
-        optimal_lag = int(np.median(lags))
-    else:
-        optimal_lag = 0
-    
-    print(f"  推定された時間遅れ（中央値）: {optimal_lag}フレーム")
-    
-    # データを10800フレームに切り出し
-    # 前後から均等に削除
-    total_to_remove = rgb_data.shape[0] - 10800
-    
-    if total_to_remove > 0:
-        # 時間遅れを考慮して開始位置を調整
-        start_idx = max(0, optimal_lag)
-        end_idx = start_idx + 10800
+    try:
+        # RGB信号データを読み込み
+        rgb_data = np.load(rgb_path)
+        print(f"  Original RGB shape: {rgb_data.shape}")
         
-        # 範囲を超える場合は調整
-        if end_idx > rgb_data.shape[0]:
-            end_idx = rgb_data.shape[0]
-            start_idx = end_idx - 10800
+        # RGB信号の特徴量を抽出
+        rgb_features, rgb_peaks = extract_rgb_features(rgb_data)
         
-        rgb_trimmed = rgb_data[start_idx:end_idx]
-    else:
-        rgb_trimmed = rgb_data
-    
-    print(f"  トリミング後の形状: {rgb_trimmed.shape}")
-    
-    # 30点平均で1Hzにダウンサンプリング（360点にする）
-    downsampled_data = []
-    for i in range(0, 10800, 30):
-        window = rgb_trimmed[i:i+30]
-        if len(window) > 0:
-            downsampled_data.append(np.mean(window, axis=0))
-    
-    downsampled_data = np.array(downsampled_data)
-    print(f"  ダウンサンプリング後の形状: {downsampled_data.shape}")
-    
-    # npyファイルとして保存
-    output_file = os.path.join(eye_below_path, subject_id, f"{subject_id}_downsampled_1Hzver2.npy")
-    np.save(output_file, downsampled_data)
-    print(f"  保存完了: {output_file}")
-    
-    # グラフを作成して保存
-    create_and_save_graph(downsampled_data, subject_id, graph_path)
-
-def create_and_save_graph(data, subject_id, graph_path):
-    """ダウンサンプリング後のRGB信号のグラフを作成"""
-    os.makedirs(graph_path, exist_ok=True)
-    
-    # 各チャンネルの平均値を計算
-    r_mean = np.mean(data[:, :, :, 0], axis=(1, 2))
-    g_mean = np.mean(data[:, :, :, 1], axis=(1, 2))
-    b_mean = np.mean(data[:, :, :, 2], axis=(1, 2))
-    
-    # 時間軸（秒）
-    time = np.arange(len(data))
-    
-    # グラフを作成
-    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 8))
-    
-    # タスクの境界を追加
-    task_boundaries = [0, 60, 120, 180, 240, 300, 360]
-    task_names = ['t1-1\n(安静)', 't2\n(息止め)', 't1-2\n(安静)', 't4\n(足踏み)', 't1-3\n(安静)', 't5\n(足に力)']
-    
-    for ax, data_channel, color, title in zip([ax1, ax2, ax3], 
-                                               [r_mean, g_mean, b_mean],
-                                               ['red', 'green', 'blue'],
-                                               ['Red Channel', 'Green Channel', 'Blue Channel']):
-        ax.plot(time, data_channel, color=color, linewidth=0.8)
-        ax.set_ylabel('Mean Intensity')
-        ax.set_title(title)
-        ax.grid(True, alpha=0.3)
+        # 血行動態データとの相関を計算
+        best_lag = 0
+        best_correlation = 0
+        best_param = None
         
-        # タスク境界を追加
-        for i, boundary in enumerate(task_boundaries[:-1]):
-            ax.axvline(x=boundary, color='gray', linestyle='--', alpha=0.5)
-            if i < len(task_names):
-                ax.text(boundary + 30, ax.get_ylim()[1] * 0.95, task_names[i], 
-                       ha='center', va='top', fontsize=8, bbox=dict(boxstyle='round,pad=0.3', 
-                       facecolor='white', alpha=0.7))
-    
-    ax3.set_xlabel('Time (seconds)')
-    
-    plt.suptitle(f'RGB Signal Analysis - {subject_id}', fontsize=14, fontweight='bold')
-    plt.tight_layout()
-    
-    # グラフを保存
-    output_file = os.path.join(graph_path, f"{subject_id}_rgb_signal.png")
-    plt.savefig(output_file, dpi=150, bbox_inches='tight')
-    plt.close()
-    print(f"  グラフ保存完了: {output_file}")
+        # 主要な血行動態パラメータを確認
+        key_params = ['CO', 'SV', 'HR_CO_SV', 'CI', 'SVI']
+        
+        for param in key_params:
+            param_path = os.path.join(hemo_base_path, param)
+            if not os.path.exists(param_path):
+                continue
+            
+            # 各タスクのデータを結合
+            all_hemo_data = []
+            task_order = ['t1-1', 't2', 't1-2', 't4', 't1-3', 't5']
+            
+            for task in task_order:
+                task_file = os.path.join(param_path, f"{param}_s2_{task}.npy")
+                if os.path.exists(task_file):
+                    try:
+                        task_data = np.load(task_file)
+                        all_hemo_data.append(task_data)
+                    except:
+                        continue
+            
+            if len(all_hemo_data) == 6:  # 全タスクのデータがある場合
+                hemo_data = np.concatenate(all_hemo_data)
+                hemo_features = extract_hemodynamic_features(hemo_data, param)
+                
+                # 時間遅れを推定
+                lag, correlation = find_optimal_lag(rgb_features, hemo_features)
+                
+                if abs(correlation) > abs(best_correlation):
+                    best_correlation = correlation
+                    best_lag = lag
+                    best_param = param
+        
+        print(f"  Best correlation with {best_param}: {best_correlation:.3f}, Lag: {best_lag} frames")
+        
+        # RGB信号のトリミング
+        # 時間遅れに基づいて開始位置を調整
+        start_idx = max(0, best_lag)
+        start_idx = min(start_idx, rgb_data.shape[0] - 10800)
+        
+        # (10800, 14, 16, 3)にトリミング
+        rgb_trimmed = rgb_data[start_idx:start_idx+10800]
+        
+        if rgb_trimmed.shape[0] < 10800:
+            # パディングが必要な場合
+            pad_size = 10800 - rgb_trimmed.shape[0]
+            rgb_trimmed = np.pad(rgb_trimmed, 
+                                ((0, pad_size), (0, 0), (0, 0), (0, 0)), 
+                                mode='edge')
+        
+        print(f"  Trimmed RGB shape: {rgb_trimmed.shape}")
+        
+        # ダウンサンプリング (30点の平均で1Hz、360点に)
+        downsampled_data = []
+        for i in range(360):
+            start = i * 30
+            end = min(start + 30, rgb_trimmed.shape[0])
+            if start < rgb_trimmed.shape[0]:
+                segment = rgb_trimmed[start:end]
+                if len(segment) > 0:
+                    downsampled_data.append(np.mean(segment, axis=0))
+                else:
+                    # 最後のセグメントが短い場合は最後の値を使用
+                    downsampled_data.append(rgb_trimmed[-1])
+        
+        downsampled_data = np.array(downsampled_data)
+        print(f"  Downsampled RGB shape: {downsampled_data.shape}")
+        
+        # データを保存
+        np.save(output_path, downsampled_data)
+        print(f"  Saved to: {output_path}")
+        
+        # グラフを作成・保存
+        fig, axes = plt.subplots(3, 1, figsize=(12, 8))
+        
+        # 各チャネルの平均輝度をプロット
+        time_axis = np.arange(360)
+        
+        for ch, color, label in zip(range(3), ['red', 'green', 'blue'], ['Red', 'Green', 'Blue']):
+            channel_mean = np.mean(downsampled_data[:, :, :, ch], axis=(1, 2))
+            axes[ch].plot(time_axis, channel_mean, color=color, linewidth=1)
+            axes[ch].set_ylabel(f'{label} Intensity')
+            axes[ch].grid(True, alpha=0.3)
+            
+            # タスク区切りを追加
+            task_boundaries = [60, 120, 180, 240, 300]
+            task_labels = ['Rest1', 'Hold', 'Rest2', 'Walk', 'Rest3', 'Leg']
+            
+            for i, boundary in enumerate(task_boundaries):
+                axes[ch].axvline(x=boundary, color='gray', linestyle='--', alpha=0.5)
+            
+            if ch == 0:
+                # 最初のサブプロットにタスクラベルを追加
+                for i in range(6):
+                    start = i * 60
+                    axes[ch].text(start + 30, axes[ch].get_ylim()[1] * 0.95, 
+                                task_labels[i], ha='center', fontsize=8)
+        
+        axes[2].set_xlabel('Time (seconds)')
+        axes[0].set_title(f'{subject_id} - RGB Signal (1Hz, 360 samples)')
+        
+        plt.tight_layout()
+        
+        # グラフを保存
+        graph_path = os.path.join(graph_output_dir, f"{subject_id}_rgb_signal.png")
+        plt.savefig(graph_path, dpi=100, bbox_inches='tight')
+        plt.close()
+        print(f"  Graph saved to: {graph_path}")
+        
+        return True
+        
+    except Exception as e:
+        print(f"  Error processing {subject_id}: {str(e)}")
+        return False
 
 def main():
     """メイン処理"""
-    # パスの設定
-    eye_below_path = r"C:\Users\EyeBelow"
-    signals_path = r"C:\Users\Data\signals_bp"
-    output_path = eye_below_path  # 同じフォルダーに保存
-    graph_path = r"C:\ダウンサンプリング後のRGB信号ver2"
-    
-    # グラフ保存フォルダーを作成
-    os.makedirs(graph_path, exist_ok=True)
-    
-    # 被験者リスト（bp001からbp032まで）
-    subjects = [f"bp{i:03d}" for i in range(1, 33)]
-    
-    print("=" * 60)
-    print("RGB信号と血行動態データの同期・ダウンサンプリング処理")
+    print("Starting RGB signal synchronization and downsampling...")
     print("=" * 60)
     
-    # 各被験者を処理
-    for subject_id in subjects:
-        try:
-            process_subject(subject_id, eye_below_path, signals_path, output_path, graph_path)
-        except Exception as e:
-            print(f"\nエラー: {subject_id}の処理中にエラーが発生しました")
-            print(f"  詳細: {e}")
-            continue
+    # 処理対象の被験者リスト
+    subjects = [f"bp{str(i).zfill(3)}" for i in range(1, 33)]
     
-    print("\n" + "=" * 60)
-    print("全ての処理が完了しました")
+    success_count = 0
+    failed_subjects = []
+    
+    for subject in subjects:
+        if process_subject(subject):
+            success_count += 1
+        else:
+            failed_subjects.append(subject)
+        print("-" * 40)
+    
+    # 結果サマリー
     print("=" * 60)
+    print(f"Processing completed!")
+    print(f"Successful: {success_count}/{len(subjects)}")
+    
+    if failed_subjects:
+        print(f"Failed subjects: {', '.join(failed_subjects)}")
+    
+    print("\nAll downsampled data saved with suffix '_downsampled_1Hzver2.npy'")
+    print("All graphs saved to 'C:\\ダウンサンプリング後のRGB信号ver2'")
 
 if __name__ == "__main__":
     main()
