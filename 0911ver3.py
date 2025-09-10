@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import matplotlib as mpl
 from sklearn.metrics import mean_absolute_error
 from scipy.stats import pearsonr
-from scipy import ndimage as ndi  # ★ 画像回転などで使用
+from scipy import ndimage as ndi  # 画像回転など
 import random
 import math
 import os
@@ -20,6 +20,21 @@ warnings.filterwarnings('ignore')
 plt.rcParams['font.sans-serif'] = ['Meiryo', 'Yu Gothic', 'Hiragino Sans', 'MS Gothic']
 plt.rcParams['axes.unicode_minus'] = False
 mpl.rcParams['font.size'] = 10
+
+# ================================
+# 色ユーティリティ
+# ================================
+def get_n_colors(n):
+    """n色を返す（tab10→tab20→hsvで拡張）"""
+    if n <= 10:
+        cmap = plt.get_cmap('tab10')
+        return [cmap(i) for i in range(n)]
+    elif n <= 20:
+        cmap = plt.get_cmap('tab20')
+        return [cmap(i) for i in range(n)]
+    else:
+        cmap = plt.get_cmap('hsv')
+        return [cmap(i / n) for i in range(n)]
 
 # ================================
 # 設定クラス
@@ -78,7 +93,7 @@ class Config:
         self.crop_scale_min = 0.85      # 辺をこの比率までクロップ（例: 36→約31ピクセル）
         self.time_stretch_min = 0.90    # 0.90～1.10倍で伸縮
         self.time_stretch_max = 1.10
-        self.brightness_delta = 0.08    # [0,1]に正規化したときの±シフト幅
+        self.brightness_delta = 0.08    # [0,1]正規化時の±シフト幅
         self.contrast_delta   = 0.10    # 1±delta の倍率
 
         # ======== 学習設定 ========
@@ -230,18 +245,8 @@ class ClipDataset(Dataset):
     def __len__(self):
         return len(self.windows)
 
-    # ---------- ここからオーグメンテーション群 ----------
-    def _random_rotate(self, frame):
-        # frame: (H,W,C)
-        deg = random.uniform(-self.cfg.rotate_max_deg, self.cfg.rotate_max_deg)
-        # 各チャンネル同じ回転
-        out = np.empty_like(frame)
-        for ch in range(frame.shape[2]):
-            out[..., ch] = ndi.rotate(frame[..., ch], deg, reshape=False, order=1, mode='reflect')
-        return out
-
+    # ---------- オーグメンテーション ----------
     def _random_crop_and_resize(self, clip):
-        # clip: (Tw,H,W,C)
         H, W = clip.shape[1], clip.shape[2]
         scale = random.uniform(self.cfg.crop_scale_min, 1.0)
         ch = max(1, int(round(H * scale)))
@@ -253,8 +258,6 @@ class ClipDataset(Dataset):
         left = random.randint(0, W - cw)
         cropped = clip[:, top:top+ch, left:left+cw, :]  # (Tw,ch,cw,C)
 
-        # リサイズ back to (H,W) using torch (bilinear)
-        # (Tw,H,W,C) → (Tw,C,H,W)
         tens = torch.from_numpy(cropped.transpose(0,3,1,2))  # (Tw,C,ch,cw)
         tens = torch.nn.functional.interpolate(
             tens, size=(H, W), mode='bilinear', align_corners=False
@@ -263,19 +266,12 @@ class ClipDataset(Dataset):
         return out.astype(np.float32)
 
     def _random_brightness_contrast(self, clip):
-        # clip: (Tw,H,W,C), 値スケール不明のため、min-max正規化で調整→元スケールへ戻す
-        vmin = np.min(clip)
-        vmax = np.max(clip)
+        vmin = np.min(clip); vmax = np.max(clip)
         rng = max(vmax - vmin, 1e-6)
         norm = (clip - vmin) / rng
-
-        # コントラスト（1±delta）、明度（±delta）
         c = 1.0 + random.uniform(-self.cfg.contrast_delta, self.cfg.contrast_delta)
         b = random.uniform(-self.cfg.brightness_delta, self.cfg.brightness_delta)
-        out = norm * c + b
-        out = np.clip(out, 0.0, 1.0)
-
-        # 元スケールに戻す
+        out = np.clip(norm * c + b, 0.0, 1.0)
         out = out * rng + vmin
         return out.astype(np.float32)
 
@@ -283,52 +279,38 @@ class ClipDataset(Dataset):
         Tw = clip.shape[0]
         fac = random.uniform(self.cfg.time_stretch_min, self.cfg.time_stretch_max)
         t = np.arange(Tw, dtype=np.float32)
-        # 目標グリッド（0..Tw-1）に対し、ソース座標を 1/fac 倍で逆写像
-        src = t / fac
-        src = np.clip(src, 0, Tw - 1)
-
-        # クリップを (Tw, P) にして各列で線形補間
+        src = np.clip(t / fac, 0, Tw - 1)
         P = clip.shape[1] * clip.shape[2] * clip.shape[3]
         flat = clip.reshape(Tw, P)
         stretched = np.empty_like(flat)
         for p in range(P):
             stretched[:, p] = np.interp(t, src, flat[:, p])
         clip_out = stretched.reshape(Tw, clip.shape[1], clip.shape[2], clip.shape[3])
-
-        # ターゲットも同様に伸縮
         target_out = np.interp(t, src, target)
-
         return clip_out.astype(np.float32), target_out.astype(np.float32)
 
     def _apply_augmentation(self, clip, target):
-        # clip: (Tw,H,W,C), target: (Tw,)
         if not self.cfg.aug_enable or not self.is_train:
             return clip, target
-
-        # 1) 回転（各フレーム、同角度）
+        # 回転（全フレーム同角度）
         if random.random() < self.cfg.aug_prob_rotate:
-            # 時系列の各フレームに同じ回転を適用
             deg = random.uniform(-self.cfg.rotate_max_deg, self.cfg.rotate_max_deg)
             out = np.empty_like(clip)
             for t in range(clip.shape[0]):
                 for ch in range(clip.shape[3]):
                     out[t, ..., ch] = ndi.rotate(clip[t, ..., ch], deg, reshape=False, order=1, mode='reflect')
             clip = out
-
-        # 2) ランダムクロップ（→元サイズにリサイズ）
+        # ランダムクロップ
         if random.random() < self.cfg.aug_prob_crop:
             clip = self._random_crop_and_resize(clip)
-
-        # 3) 明度/コントラスト
+        # 明度/コントラスト
         if random.random() < self.cfg.aug_prob_bc:
             clip = self._random_brightness_contrast(clip)
-
-        # 4) 時間ストレッチ（Twは維持）
+        # 時間ストレッチ（Twは維持）
         if random.random() < self.cfg.aug_prob_time:
             clip, target = self._random_time_stretch(clip, target)
-
         return clip, target
-    # ---------- オーグメンテーション終わり ----------
+    # ---------- ここまで ----------
 
     def _to_C_M_T(self, clip):  # (Tw,H,W,C’) -> (C’, M, Tw)
         Tw, H, W, C = clip.shape
@@ -340,16 +322,13 @@ class ClipDataset(Dataset):
         s, e = self.windows[idx]
         clip = self.rgb[s:e]         # (Tw,H,W,C’)
         target = self.sig[s:e]       # (Tw,)
-
-        # オーグメンテーション（学習時のみ）
         clip, target = self._apply_augmentation(clip, target)
 
         if self.mode == '2d':
             if self.cfg.roi_mode == 'block16x14':
                 ph = math.floor(self.H / 14)
                 pw = math.floor(self.W / 16)
-                hh = ph * 14
-                ww = pw * 16
+                hh = ph * 14; ww = pw * 16
                 c = clip[:, :hh, :ww, :].reshape(
                     clip.shape[0], 14, ph, 16, pw, clip.shape[3]
                 ).mean(axis=(2, 4))   # (Tw,14,16,C’)
@@ -365,7 +344,7 @@ class ClipDataset(Dataset):
         return x, y, start_idx
 
 # ================================
-# 既存1Dモデル（5/8ブロック）
+# 1Dモデル（5/8ブロック）
 # ================================
 class PhysNet2DCNN(nn.Module):
     """1D畳み込み版（既存）"""
@@ -374,51 +353,41 @@ class PhysNet2DCNN(nn.Module):
         in_channels = input_shape[2]
         self.conv_block1 = nn.Sequential(
             nn.Conv1d(in_channels, 32, kernel_size=5, padding=2),
-            nn.BatchNorm1d(32),
-            nn.ELU(),
+            nn.BatchNorm1d(32), nn.ELU(),
             nn.Conv1d(32, 32, kernel_size=5, padding=2),
-            nn.BatchNorm1d(32),
-            nn.ELU()
+            nn.BatchNorm1d(32), nn.ELU()
         )
         self.avgpool1 = nn.AvgPool1d(kernel_size=2, stride=2)
         self.conv_block2 = nn.Sequential(
             nn.Conv1d(32, 64, kernel_size=3, padding=1),
-            nn.BatchNorm1d(64),
-            nn.ELU(),
+            nn.BatchNorm1d(64), nn.ELU(),
             nn.Conv1d(64, 64, kernel_size=3, padding=1),
-            nn.BatchNorm1d(64),
-            nn.ELU()
+            nn.BatchNorm1d(64), nn.ELU()
         )
         self.avgpool2 = nn.AvgPool1d(kernel_size=2, stride=2)
         self.conv_block3 = nn.Sequential(
             nn.Conv1d(64, 64, kernel_size=3, padding=1),
-            nn.BatchNorm1d(64),
-            nn.ELU(),
+            nn.BatchNorm1d(64), nn.ELU(),
             nn.Conv1d(64, 64, kernel_size=3, padding=1),
-            nn.BatchNorm1d(64),
-            nn.ELU()
+            nn.BatchNorm1d(64), nn.ELU()
         )
         self.avgpool3 = nn.AvgPool1d(kernel_size=2, stride=2)
         self.conv_block4 = nn.Sequential(
             nn.Conv1d(64, 64, kernel_size=3, padding=1),
-            nn.BatchNorm1d(64),
-            nn.ELU(),
+            nn.BatchNorm1d(64), nn.ELU(),
             nn.Conv1d(64, 64, kernel_size=3, padding=1),
-            nn.BatchNorm1d(64),
-            nn.ELU()
+            nn.BatchNorm1d(64), nn.ELU()
         )
         self.avgpool4 = nn.AvgPool1d(kernel_size=2, stride=2)
         self.conv_block5 = nn.Sequential(
             nn.Conv1d(64, 64, kernel_size=3, padding=1),
-            nn.BatchNorm1d(64),
-            nn.ELU()
+            nn.BatchNorm1d(64), nn.ELU()
         )
         self.global_avgpool = nn.AdaptiveAvgPool1d(1)
         self.conv_final = nn.Conv1d(64, 1, kernel_size=1)
         self.dropout = nn.Dropout(0.2)
         
     def forward(self, x):
-        # x: (B,C,H,W) → (B,C,H*W)
         B, C, H, W = x.size()
         x = x.view(B, C, -1)
         x = self.conv_block1(x); x = self.avgpool1(x); x = self.dropout(x)
@@ -522,8 +491,6 @@ class DeepPhysNet2DCNN(nn.Module):
 class PhysNet2DCNN_2D(nn.Module):
     """
     入力: (B, C, M, T)   出力: (B, 1, T)
-    空間方向を主に縮小し、時間を一旦1/4にダウンサンプル後、x2×x2で復元。
-    最終は空間GAP→Conv1d(1×1)で (B,1,T)。
     """
     def __init__(self, in_channels=3):
         super().__init__()
@@ -556,7 +523,6 @@ class PhysNet2DCNN_2D(nn.Module):
         self.fout = nn.Conv1d(64, 1, kernel_size=1)
 
     def forward(self, x):
-        # x: (B,C,M,T)
         x = self.c1(x); x = self.p1(x)
         x = self.c2(x); x = self.p2(x)
         x = self.c3(x); x = self.p3(x)
@@ -572,7 +538,6 @@ class PhysNet2DCNN_2D(nn.Module):
 class PhysNet2DCNN_3D(nn.Module):
     """
     入力: (B, C, H, W, T)   出力: (B, 1, T)
-    3D畳み込みで空間中心にプーリング→空間GAP→1x1Conv(時間)。
     """
     def __init__(self, in_channels=3):
         super().__init__()
@@ -594,8 +559,7 @@ class PhysNet2DCNN_3D(nn.Module):
         self.fout = nn.Conv1d(64, 1, kernel_size=1)
 
     def forward(self, x):
-        # x: (B,C,H,W,T) → (B,C,T,H,W)
-        x = x.permute(0, 1, 4, 2, 3)
+        x = x.permute(0, 1, 4, 2, 3)  # (B,C,T,H,W)
         x = self.block1(x)
         x = self.block2(x)
         x = self.block3(x)
@@ -652,7 +616,7 @@ def load_data_single_subject(subject, config):
             print(f"警告: {subject}の{task}の{config.signal_type}データが見つかりません")
             return None, None
         signal_data_list.append(np.load(signal_path))
-    signal_data = np.concatenate(signal_data_list)  # 期待形状: (360,)
+    signal_data = np.concatenate(signal_data_list)  # (360,)
     return rgb_data, signal_data
 
 # ================================
@@ -778,11 +742,11 @@ def train_model(model, train_loader, val_loader, config, fold=None, subject=None
         val_preds = _flatten(val_preds)
         val_targets = _flatten(val_targets)
 
-        train_loss /= len(train_loader)
-        val_loss   /= len(val_loader)
+        train_loss /= max(len(train_loader), 1)
+        val_loss   /= max(len(val_loader), 1)
         train_corr = np.corrcoef(train_preds_all, train_targets_all)[0, 1] if len(train_preds_all)>1 else 0.0
         val_corr   = np.corrcoef(val_preds, val_targets)[0, 1] if len(val_preds)>1 else 0.0
-        val_mae    = mean_absolute_error(val_targets, val_preds)
+        val_mae    = mean_absolute_error(val_targets, val_preds) if len(val_targets)>0 else 0.0
 
         train_losses.append(train_loss)
         val_losses.append(val_loss)
@@ -851,7 +815,6 @@ def evaluate_model(model, test_loader, config):
     else:
         ds = test_loader.dataset
         T_total = ds.T
-        Tw = config.temporal_window
         sum_pred = np.zeros(T_total, dtype=np.float64)
         cnt_pred = np.zeros(T_total, dtype=np.float64)
         gt = ds.sig.copy()
@@ -875,12 +838,12 @@ def evaluate_model(model, test_loader, config):
         predictions = (sum_pred / cnt_pred).astype(np.float32)
         targets = gt.astype(np.float32)
 
-    mae  = mean_absolute_error(targets, predictions)
-    rmse = np.sqrt(np.mean((targets - predictions) ** 2))
-    if np.std(targets) == 0 or np.std(predictions) == 0:
-        corr, p_value = 0.0, 1.0
-    else:
+    mae  = mean_absolute_error(targets, predictions) if len(targets)>0 else 0.0
+    rmse = np.sqrt(np.mean((targets - predictions) ** 2)) if len(targets)>0 else 0.0
+    if len(targets)>1 and np.std(targets) > 0 and np.std(predictions) > 0:
         corr, p_value = pearsonr(targets, predictions)
+    else:
+        corr, p_value = 0.0, 1.0
     ss_res = np.sum((targets - predictions) ** 2)
     ss_tot = np.sum((targets - np.mean(targets)) ** 2) + 1e-8
     r2 = 1 - (ss_res / ss_tot)
@@ -987,19 +950,23 @@ def task_cross_validation(rgb_data, signal_data, config, subject, subject_save_d
         all_test_predictions.extend(test_results['predictions'])
         all_test_targets.extend(test_results['targets'])
 
-        # 各Foldのプロット
+        # 各Foldの標準プロット（個別）
         plot_fold_results(fold_results[-1], subject_save_dir)
 
     # リスト→配列
     all_test_predictions = np.array(all_test_predictions)
     all_test_targets = np.array(all_test_targets)
+
+    # ★ 交差検証の色分けまとめ図（散布図 & 波形）
+    plot_cv_colored_for_subject(fold_results, all_test_predictions, all_test_targets, config, subject, subject_save_dir)
+
     return fold_results, all_test_predictions, all_test_targets
 
 # ================================
-# プロット関数
+# プロット関数（個別Fold）
 # ================================
 def plot_fold_results(result, save_dir):
-    """各Foldの結果をプロット"""
+    """各Foldの結果をプロット（個別）"""
     fold = result['fold']
     # 訓練散布図
     plt.figure(figsize=(10, 8))
@@ -1047,30 +1014,83 @@ def plot_fold_results(result, save_dir):
     plt.savefig(save_dir / f'fold{fold}_waveforms.png', dpi=150, bbox_inches='tight')
     plt.close()
 
+# ================================
+# ★ 交差検証：色分けまとめ図
+# ================================
+def plot_cv_colored_for_subject(fold_results, all_test_predictions, all_test_targets, config, subject, subject_save_dir):
+    """
+    1) テスト散布図（6 Fold色分け）
+    2) テスト波形（360秒）をFoldごとに色分け（予測は色線、真値は灰色）
+    """
+    colors = get_n_colors(len(fold_results))
+    # 1) 散布図（Fold色分け）
+    plt.figure(figsize=(10, 8))
+    min_val = float('inf'); max_val = -float('inf')
+    for i, fr in enumerate(fold_results):
+        tt = fr['test_targets']; pp = fr['test_predictions']
+        plt.scatter(tt, pp, alpha=0.6, s=18, color=colors[i], label=f"Fold {fr['fold']} ({fr['test_task']})")
+        min_val = min(min_val, tt.min(), pp.min())
+        max_val = max(max_val, tt.max(), pp.max())
+    if min_val < max_val:
+        plt.plot([min_val, max_val], [min_val, max_val], 'k--', lw=1.5, label='y=x')
+    plt.xlabel('真値'); plt.ylabel('予測値')
+    plt.title(f"{subject} 交差検証（テスト散布図・色分け）")
+    plt.grid(True, alpha=0.3)
+    plt.legend(loc='best', fontsize=8)
+    plt.tight_layout()
+    plt.savefig(subject_save_dir / 'cv_colored_scatter.png', dpi=150, bbox_inches='tight')
+    plt.close()
+
+    # 2) 波形（Fold色分け）
+    plt.figure(figsize=(20, 6))
+    start = 0
+    for i, fr in enumerate(fold_results):
+        T_fold = len(fr['test_targets'])  # 多くは60
+        t = np.arange(start, start + T_fold)
+        # 真値（薄灰）
+        plt.plot(t, fr['test_targets'], color=(0.3,0.3,0.3,0.35), linewidth=1.2, label='真値' if i==0 else None)
+        # 予測（Fold色）
+        plt.plot(t, fr['test_predictions'], color=colors[i], linewidth=1.5, label=f"予測 Fold {fr['fold']} ({fr['test_task']})")
+        start += T_fold
+    # タスク境界
+    for i in range(1, len(config.tasks)):
+        plt.axvline(x=i*config.task_duration, color='k', linestyle='--', alpha=0.3)
+    plt.xlabel('時間 (秒)'); plt.ylabel('信号値')
+    plt.title(f"{subject} 交差検証（テスト波形・Fold色分け）")
+    plt.legend(ncol=3, fontsize=8)
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(subject_save_dir / 'cv_colored_waveform.png', dpi=150, bbox_inches='tight')
+    plt.close()
+
+# ================================
+# 被験者サマリー（従来図）
+# ================================
 def plot_subject_summary(fold_results, all_test_predictions, all_test_targets, subject, subject_save_dir):
-    """被験者の全体結果をプロット"""
+    """被験者の全体結果をプロット（従来図も出力しておく）"""
     # 訓練データ統合（窓フラット）
     all_train_predictions = np.concatenate([r['train_predictions'] for r in fold_results])
     all_train_targets = np.concatenate([r['train_targets'] for r in fold_results])
-    all_train_mae = mean_absolute_error(all_train_targets, all_train_predictions)
+    all_train_mae = mean_absolute_error(all_train_targets, all_train_predictions) if len(all_train_targets)>0 else 0.0
     try:
-        all_train_corr, _ = pearsonr(all_train_targets, all_train_predictions)
+        all_train_corr, _ = pearsonr(all_train_targets, all_train_predictions) if len(all_train_targets)>1 else (0.0,1.0)
     except Exception:
         all_train_corr = 0.0
 
-    # 全テストメトリクス（60*6=360点）
-    all_test_mae = mean_absolute_error(all_test_targets, all_test_predictions)
+    # 全テストメトリクス（360点）
+    all_test_mae = mean_absolute_error(all_test_targets, all_test_predictions) if len(all_test_targets)>0 else 0.0
     try:
-        all_test_corr, _ = pearsonr(all_test_targets, all_test_predictions)
+        all_test_corr, _ = pearsonr(all_test_targets, all_test_predictions) if len(all_test_targets)>1 else (0.0,1.0)
     except Exception:
         all_test_corr = 0.0
 
     # 訓練散布
     plt.figure(figsize=(10, 8))
     plt.scatter(all_train_targets, all_train_predictions, alpha=0.5, s=10)
-    min_val = min(all_train_targets.min(), all_train_predictions.min())
-    max_val = max(all_train_targets.max(), all_train_predictions.max())
-    plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2)
+    if len(all_train_targets)>0:
+        min_val = min(all_train_targets.min(), all_train_predictions.min())
+        max_val = max(all_train_targets.max(), all_train_predictions.max())
+        plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2)
     plt.xlabel('真値'); plt.ylabel('予測値')
     plt.title(f"{subject} 全訓練データ - MAE: {all_train_mae:.3f}, Corr: {all_train_corr:.3f}")
     plt.grid(True, alpha=0.3)
@@ -1081,9 +1101,10 @@ def plot_subject_summary(fold_results, all_test_predictions, all_test_targets, s
     # テスト散布
     plt.figure(figsize=(10, 8))
     plt.scatter(all_test_targets, all_test_predictions, alpha=0.5, s=10)
-    min_val = min(all_test_targets.min(), all_test_predictions.min())
-    max_val = max(all_test_targets.max(), all_test_predictions.max())
-    plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2)
+    if len(all_test_targets)>0:
+        min_val = min(all_test_targets.min(), all_test_predictions.min())
+        max_val = max(all_test_targets.max(), all_test_predictions.max())
+        plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2)
     plt.xlabel('真値'); plt.ylabel('予測値')
     plt.title(f"{subject} 全テストデータ - MAE: {all_test_mae:.3f}, Corr: {all_test_corr:.3f}")
     plt.grid(True, alpha=0.3)
@@ -1106,47 +1127,39 @@ def plot_subject_summary(fold_results, all_test_predictions, all_test_targets, s
 
     return all_train_mae, all_train_corr, all_test_mae, all_test_corr
 
+# ================================
+# ★ 全被験者：1つのグラフ（被験者色分け）
+# ================================
 def plot_all_subjects_summary(all_subjects_results, config):
-    """全被験者のサマリープロット"""
+    """
+    1枚の散布図にプロット：
+      x = 各被験者の Test MAE
+      y = 各被験者の Test Corr
+      色 = 被験者ごと（legend付き）
+    """
     save_dir = Path(config.save_path)
-    subjects, train_maes, train_corrs, test_maes, test_corrs = [], [], [], [], []
-    for result in all_subjects_results:
-        subjects.append(result['subject'])
-        train_maes.append(result['train_mae'])
-        train_corrs.append(result['train_corr'])
-        test_maes.append(result['test_mae'])
-        test_corrs.append(result['test_corr'])
+    n = len(all_subjects_results)
+    if n == 0:
+        return
 
-    # 訓練サマリー
-    fig, axes = plt.subplots(4, 8, figsize=(24, 12))
-    axes = axes.ravel()
-    for i, result in enumerate(all_subjects_results[:32]):
-        ax = axes[i]
-        ax.text(0.5, 0.5, f"{result['subject']}\nMAE: {result['train_mae']:.3f}\nCorr: {result['train_corr']:.3f}",
-                ha='center', va='center', fontsize=9, transform=ax.transAxes)
-        ax.set_xlim(0, 1); ax.set_ylim(0, 1)
-        ax.set_xticks([]); ax.set_yticks([])
-        ax.set_facecolor('#e8f4f8' if result['train_corr'] > 0.7 else '#f8e8e8')
-    fig.suptitle(f'全被験者 訓練データ結果 - 平均MAE: {np.mean(train_maes):.3f}, 平均Corr: {np.mean(train_corrs):.3f}',
-                 fontsize=14)
-    plt.tight_layout()
-    plt.savefig(save_dir / 'all_subjects_train_summary.png', dpi=150, bbox_inches='tight')
-    plt.close()
+    colors = get_n_colors(n)
+    xs = [r['test_mae'] for r in all_subjects_results]
+    ys = [r['test_corr'] for r in all_subjects_results]
+    labels = [r['subject'] for r in all_subjects_results]
 
-    # テストサマリー
-    fig, axes = plt.subplots(4, 8, figsize=(24, 12))
-    axes = axes.ravel()
-    for i, result in enumerate(all_subjects_results[:32]):
-        ax = axes[i]
-        ax.text(0.5, 0.5, f"{result['subject']}\nMAE: {result['test_mae']:.3f}\nCorr: {result['test_corr']:.3f}",
-                ha='center', va='center', fontsize=9, transform=ax.transAxes)
-        ax.set_xlim(0, 1); ax.set_ylim(0, 1)
-        ax.set_xticks([]); ax.set_yticks([])
-        ax.set_facecolor('#e8f4f8' if result['test_corr'] > 0.7 else '#f8e8e8')
-    fig.suptitle(f'全被験者 テストデータ結果 - 平均MAE: {np.mean(test_maes):.3f}, 平均Corr: {np.mean(test_corrs):.3f}',
-                 fontsize=14)
+    plt.figure(figsize=(12, 9))
+    for i in range(n):
+        plt.scatter(xs[i], ys[i], color=colors[i], s=60, edgecolors='k', linewidths=0.5, label=labels[i])
+        # 近くにラベルも付与（重なりにくいように少しずらす）
+        plt.annotate(labels[i], (xs[i], ys[i]), textcoords="offset points", xytext=(5,5), fontsize=8, color=colors[i])
+
+    plt.xlabel('Test MAE'); plt.ylabel('Test Corr')
+    plt.title('全被験者サマリー（MAE vs Corr・被験者色分け）')
+    plt.grid(True, alpha=0.3)
+    # 凡例を外側に
+    plt.legend(loc='center left', bbox_to_anchor=(1.02, 0.5), fontsize=8, ncol=1, frameon=False)
     plt.tight_layout()
-    plt.savefig(save_dir / 'all_subjects_test_summary.png', dpi=150, bbox_inches='tight')
+    plt.savefig(save_dir / 'all_subjects_single_scatter.png', dpi=150, bbox_inches='tight')
     plt.close()
 
 # ================================
@@ -1156,7 +1169,7 @@ def main():
     config = Config()
     
     print("\n" + "="*60)
-    print(" PhysNet2DCNN - 個人内解析（6分割交差検証） with Augmentation")
+    print(" PhysNet2DCNN - 個人内解析（6分割交差検証） with Augmentation & Colored Plots")
     print("="*60)
     print(f"血行動態信号: {config.signal_type}")
     print(f"モデルタイプ: {config.model_type}")
@@ -1193,7 +1206,7 @@ def main():
                 rgb_data, signal_data, config, subject, subject_save_dir
             )
             
-            # 被験者サマリー
+            # 被験者サマリー（従来図）
             train_mae, train_corr, test_mae, test_corr = plot_subject_summary(
                 fold_results, all_test_predictions, all_test_targets, subject, subject_save_dir
             )
@@ -1217,10 +1230,10 @@ def main():
             traceback.print_exc()
             continue
     
-    # 全被験者サマリープロット
+    # ★ 全被験者 1つのグラフ（色分け）
     if all_subjects_results:
         print(f"\n{'='*60}")
-        print("全被験者サマリー作成中...")
+        print("全被験者サマリー（1枚グラフ）作成中...")
         plot_all_subjects_summary(all_subjects_results, config)
         
         # 統計サマリー
