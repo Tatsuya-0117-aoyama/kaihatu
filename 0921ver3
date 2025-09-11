@@ -42,6 +42,11 @@ class Config:
         self.use_lab = True  # LABデータを使用するか（True: RGB+LAB, False: RGBのみ）
         self.lab_filename = "_downsampled_1Hzver2.npy"  # LABデータのファイル名
         
+        # ================================
+        # 訓練・検証分割設定（新規追加）
+        # ================================
+        self.train_val_split_ratio = 0.9  # 訓練データの割合（90%）→1:9分割
+        
         # 血行動態信号タイプ設定
         self.signal_type = "CO"  # "CO", "HbO", "HbR", "HbT" など
         self.signal_prefix = "CO_s2"  # ファイル名のプレフィックス
@@ -53,23 +58,28 @@ class Config:
         self.tasks = ["t1-1", "t2", "t1-2", "t4", "t1-3", "t5"]
         self.task_duration = 60  # 各タスクの長さ（秒）
         
-        # ================================
-        # 訓練・検証分割設定（新規追加）
-        # ================================
-        self.train_val_split_ratio = 0.9  # 訓練データの割合（90%）
+        # タスクごとの色設定（交差検証プロット用）
+        self.task_colors = {
+            "t1-1": "#FF6B6B",  # 赤系
+            "t2": "#4ECDC4",    # 青緑系
+            "t1-2": "#45B7D1",  # 青系
+            "t4": "#96CEB4",    # 緑系
+            "t1-3": "#FECA57",  # 黄系
+            "t5": "#DDA0DD"     # 紫系
+        }
         
         # モデルタイプ選択
         # "standard": 元のモデル（5ブロック構成）
         # "deep": 深いモデル（8ブロック構成）
         # "3d": CalibrationPhys準拠 3D畳み込みモデル
         # "2d": CalibrationPhys準拠 2D畳み込みモデル（効率版）
-        self.model_type = "standard"  # デフォルトはstandardモデル
+        self.model_type = "3d"  # デフォルトは3Dモデル
         
-        # 使用チャンネル設定（全モデル共通）
-        # 'R', 'G', 'B', 'RGB', 'RG', 'GB', 'RB', 'LAB', 'RGB+LAB'
+        # 使用チャンネル設定（LAB使用時は自動設定）
         if self.use_lab:
-            self.use_channel = 'RGB+LAB'  # LAB使用時はRGB+LAB
+            self.use_channel = 'RGB+LAB'  # LAB使用時はRGB+LAB（6チャンネル）
         else:
+            # 'R', 'G', 'B', 'RGB', 'RG', 'GB', 'RB'
             self.use_channel = 'RGB'
         
         # チャンネル数の自動計算
@@ -447,7 +457,7 @@ class HuberCorrelationLoss(nn.Module):
         return total_loss, huber_loss, corr_loss
 
 # ================================
-# チャンネル選択ユーティリティ
+# チャンネル選択ユーティリティ（LABサポート追加）
 # ================================
 def select_channels(data, use_channel):
     """
@@ -556,7 +566,7 @@ class CODataset(Dataset):
         return rgb_tensor, signal_tensor
 
 # ================================
-# モデル定義（元のコードと同じ）
+# オリジナルのPhysNet2DCNNモデル
 # ================================
 class PhysNet2DCNN(nn.Module):
     """オリジナルのPhysNet2DCNN（5ブロック構成）"""
@@ -664,6 +674,9 @@ class PhysNet2DCNN(nn.Module):
         
         return x
 
+# ================================
+# 深層PhysNet2DCNNモデル
+# ================================
 class DeepPhysNet2DCNN(nn.Module):
     """深層PhysNet2DCNN（8ブロック構成）"""
     def __init__(self, input_shape):
@@ -810,16 +823,31 @@ class DeepPhysNet2DCNN(nn.Module):
         
         return x
 
+# ================================
+# CalibrationPhys準拠 PhysNet2DCNN (3D版) - 可変サイズ対応
+# ================================
 class PhysNet2DCNN_3D(nn.Module):
-    """CalibrationPhys論文準拠のPhysNet2DCNN（3D畳み込み版）"""
+    """
+    CalibrationPhys論文準拠のPhysNet2DCNN（3D畳み込み版）
+    様々な入力サイズに対応（14x16, 36x36など）
+    入力: (batch_size, time_frames, height, width, channels)
+    出力: (batch_size, time_frames) の脈波/呼吸波形
+    """
     def __init__(self, input_shape=None):
         super(PhysNet2DCNN_3D, self).__init__()
         
         # 入力チャンネル数を動的に設定
         if input_shape is not None:
             in_channels = input_shape[-1]
+            height = input_shape[1] if len(input_shape) >= 3 else 36
+            width = input_shape[2] if len(input_shape) >= 3 else 36
         else:
-            in_channels = 3  # デフォルト
+            in_channels = 3
+            height = 36
+            width = 36
+        
+        # 入力サイズに基づいてプーリングサイズを調整
+        self.adaptive_pooling = height < 36 or width < 36
         
         # ConvBlock 1: 32 filters
         self.conv1_1 = nn.Conv3d(in_channels, 32, kernel_size=(1, 5, 5), padding=(0, 2, 2))
@@ -830,7 +858,11 @@ class PhysNet2DCNN_3D(nn.Module):
         self.bn1_2 = nn.BatchNorm3d(32)
         self.elu1_2 = nn.ELU(inplace=True)
         
-        self.pool1 = nn.AvgPool3d(kernel_size=(1, 2, 2), stride=(1, 2, 2))
+        # 小さい入力に対応したプーリング
+        if height <= 16 or width <= 16:
+            self.pool1 = nn.Identity()  # プーリングをスキップ
+        else:
+            self.pool1 = nn.AvgPool3d(kernel_size=(1, 2, 2), stride=(1, 2, 2))
         
         # ConvBlock 2: 64 filters
         self.conv2_1 = nn.Conv3d(32, 64, kernel_size=(3, 3, 3), padding=(1, 1, 1))
@@ -841,7 +873,11 @@ class PhysNet2DCNN_3D(nn.Module):
         self.bn2_2 = nn.BatchNorm3d(64)
         self.elu2_2 = nn.ELU(inplace=True)
         
-        self.pool2 = nn.AvgPool3d(kernel_size=(2, 2, 2), stride=(2, 2, 2))
+        # 条件付きプーリング
+        if height <= 16 or width <= 16:
+            self.pool2 = nn.AvgPool3d(kernel_size=(2, 1, 1), stride=(2, 1, 1))
+        else:
+            self.pool2 = nn.AvgPool3d(kernel_size=(2, 2, 2), stride=(2, 2, 2))
         
         # ConvBlock 3: 64 filters
         self.conv3_1 = nn.Conv3d(64, 64, kernel_size=(3, 3, 3), padding=(1, 1, 1))
@@ -886,13 +922,20 @@ class PhysNet2DCNN_3D(nn.Module):
         self.bn6_2 = nn.BatchNorm3d(64)
         self.elu6_2 = nn.ELU(inplace=True)
         
-        # Spatial Global Average Pooling
+        # Adaptive Spatial Global Average Pooling（どんなサイズでも1x1に）
         self.spatial_pool = nn.AdaptiveAvgPool3d((None, 1, 1))
         
         # Final Conv
         self.conv_final = nn.Conv3d(64, 1, kernel_size=1)
         
+        # Dropout
+        self.dropout = nn.Dropout(0.2)
+        
     def forward(self, x):
+        """
+        入力: x shape (B, T, H, W, C)
+        出力: shape (B, T_out) 脈波/呼吸波形
+        """
         batch_size = x.size(0)
         time_frames = x.size(1)
         
@@ -907,6 +950,7 @@ class PhysNet2DCNN_3D(nn.Module):
         x = self.bn1_2(x)
         x = self.elu1_2(x)
         x = self.pool1(x)
+        x = self.dropout(x)
         
         # ConvBlock 2
         x = self.conv2_1(x)
@@ -916,6 +960,7 @@ class PhysNet2DCNN_3D(nn.Module):
         x = self.bn2_2(x)
         x = self.elu2_2(x)
         x = self.pool2(x)
+        x = self.dropout(x)
         
         # ConvBlock 3
         x = self.conv3_1(x)
@@ -925,6 +970,7 @@ class PhysNet2DCNN_3D(nn.Module):
         x = self.bn3_2(x)
         x = self.elu3_2(x)
         x = self.pool3(x)
+        x = self.dropout(x)
         
         # ConvBlock 4
         x = self.conv4_1(x)
@@ -934,6 +980,7 @@ class PhysNet2DCNN_3D(nn.Module):
         x = self.bn4_2(x)
         x = self.elu4_2(x)
         x = self.pool4(x)
+        x = self.dropout(x)
         
         # ConvBlock 5
         x = self.conv5_1(x)
@@ -952,7 +999,7 @@ class PhysNet2DCNN_3D(nn.Module):
         x = self.bn6_2(x)
         x = self.elu6_2(x)
         
-        # Spatial Global Average Pooling
+        # Spatial Global Average Pooling（どんなサイズでも対応）
         x = self.spatial_pool(x)
         
         # Final Conv
@@ -962,32 +1009,57 @@ class PhysNet2DCNN_3D(nn.Module):
         x = x.squeeze(1).squeeze(-1).squeeze(-1)
         
         # 元の時間長に補間
-        x = F.interpolate(x.unsqueeze(1), size=time_frames, mode='linear', align_corners=False)
-        x = x.squeeze(1)
+        if x.size(-1) != time_frames:
+            x = F.interpolate(x.unsqueeze(1), size=time_frames, mode='linear', align_corners=False)
+            x = x.squeeze(1)
         
         return x
 
+
+# ================================
+# CalibrationPhys準拠 PhysNet2DCNN (2D版) - 可変サイズ対応
+# ================================
 class PhysNet2DCNN_2D(nn.Module):
-    """2D畳み込みを使用したPhysNet2DCNN（効率的な実装）"""
+    """
+    2D畳み込みを使用したPhysNet2DCNN（効率的な実装）
+    様々な入力サイズに対応（14x16, 36x36など）
+    入力: (batch_size, time_frames, height, width, channels)
+    """
     def __init__(self, input_shape=None):
         super(PhysNet2DCNN_2D, self).__init__()
         
-        # 入力チャンネル数を動的に設定
+        # 入力チャンネル数とサイズを動的に設定
         if input_shape is not None:
             in_channels = input_shape[-1]
+            height = input_shape[1] if len(input_shape) >= 3 else 36
+            width = input_shape[2] if len(input_shape) >= 3 else 36
         else:
-            in_channels = 3  # デフォルト
+            in_channels = 3
+            height = 36
+            width = 36
+        
+        # 小さい入力サイズの検出
+        self.small_input = height <= 16 or width <= 16
         
         # ConvBlock 1: 32 filters
-        self.conv1_1 = nn.Conv2d(in_channels, 32, kernel_size=5, padding=2)
+        if self.small_input:
+            # 小さい入力用：カーネルサイズを小さく
+            self.conv1_1 = nn.Conv2d(in_channels, 32, kernel_size=3, padding=1)
+            self.conv1_2 = nn.Conv2d(32, 32, kernel_size=3, padding=1)
+        else:
+            self.conv1_1 = nn.Conv2d(in_channels, 32, kernel_size=5, padding=2)
+            self.conv1_2 = nn.Conv2d(32, 32, kernel_size=5, padding=2)
+        
         self.bn1_1 = nn.BatchNorm2d(32)
         self.elu1_1 = nn.ELU(inplace=True)
-        
-        self.conv1_2 = nn.Conv2d(32, 32, kernel_size=5, padding=2)
         self.bn1_2 = nn.BatchNorm2d(32)
         self.elu1_2 = nn.ELU(inplace=True)
         
-        self.pool1 = nn.AvgPool2d(kernel_size=2, stride=2)
+        # 条件付きプーリング
+        if self.small_input:
+            self.pool1 = nn.Identity()  # プーリングをスキップ
+        else:
+            self.pool1 = nn.AvgPool2d(kernel_size=2, stride=2)
         
         # ConvBlock 2: 64 filters
         self.conv2_1 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
@@ -998,7 +1070,11 @@ class PhysNet2DCNN_2D(nn.Module):
         self.bn2_2 = nn.BatchNorm2d(64)
         self.elu2_2 = nn.ELU(inplace=True)
         
-        self.pool2 = nn.AvgPool2d(kernel_size=2, stride=2)
+        # 条件付きプーリング
+        if self.small_input:
+            self.pool2 = nn.AvgPool2d(kernel_size=2, stride=2)
+        else:
+            self.pool2 = nn.AvgPool2d(kernel_size=2, stride=2)
         
         # ConvBlock 3: 64 filters
         self.conv3_1 = nn.Conv2d(64, 64, kernel_size=3, padding=1)
@@ -1009,18 +1085,23 @@ class PhysNet2DCNN_2D(nn.Module):
         self.bn3_2 = nn.BatchNorm2d(64)
         self.elu3_2 = nn.ELU(inplace=True)
         
-        self.pool3 = nn.AvgPool2d(kernel_size=2, stride=2)
+        # 条件付きプーリング
+        if self.small_input:
+            self.pool3 = nn.Identity()  # スキップ
+        else:
+            self.pool3 = nn.AvgPool2d(kernel_size=2, stride=2)
         
-        # ConvBlock 4: 64 filters
-        self.conv4_1 = nn.Conv2d(64, 64, kernel_size=3, padding=1)
-        self.bn4_1 = nn.BatchNorm2d(64)
-        self.elu4_1 = nn.ELU(inplace=True)
-        
-        self.conv4_2 = nn.Conv2d(64, 64, kernel_size=3, padding=1)
-        self.bn4_2 = nn.BatchNorm2d(64)
-        self.elu4_2 = nn.ELU(inplace=True)
-        
-        self.pool4 = nn.AvgPool2d(kernel_size=2, stride=2)
+        # ConvBlock 4: 64 filters（小さい入力では省略可能）
+        if not self.small_input:
+            self.conv4_1 = nn.Conv2d(64, 64, kernel_size=3, padding=1)
+            self.bn4_1 = nn.BatchNorm2d(64)
+            self.elu4_1 = nn.ELU(inplace=True)
+            
+            self.conv4_2 = nn.Conv2d(64, 64, kernel_size=3, padding=1)
+            self.bn4_2 = nn.BatchNorm2d(64)
+            self.elu4_2 = nn.ELU(inplace=True)
+            
+            self.pool4 = nn.AvgPool2d(kernel_size=2, stride=2)
         
         # ConvBlock 5: 64 filters
         self.conv5_1 = nn.Conv2d(64, 64, kernel_size=3, padding=1)
@@ -1031,7 +1112,7 @@ class PhysNet2DCNN_2D(nn.Module):
         self.bn5_2 = nn.BatchNorm2d(64)
         self.elu5_2 = nn.ELU(inplace=True)
         
-        # Spatial Global Average Pooling
+        # Adaptive Spatial Global Average Pooling（どんなサイズでも1x1に）
         self.spatial_pool = nn.AdaptiveAvgPool2d((1, 1))
         
         # Temporal processing
@@ -1050,6 +1131,10 @@ class PhysNet2DCNN_2D(nn.Module):
         self.dropout = nn.Dropout(0.2)
         
     def forward(self, x):
+        """
+        入力: x shape (B, T, H, W, C)
+        出力: shape (B, T) 脈波/呼吸波形
+        """
         batch_size, time_frames = x.size(0), x.size(1)
         
         # 時間次元をバッチに結合
@@ -1087,15 +1172,16 @@ class PhysNet2DCNN_2D(nn.Module):
         x = self.pool3(x)
         x = self.dropout(x)
         
-        # ConvBlock 4
-        x = self.conv4_1(x)
-        x = self.bn4_1(x)
-        x = self.elu4_1(x)
-        x = self.conv4_2(x)
-        x = self.bn4_2(x)
-        x = self.elu4_2(x)
-        x = self.pool4(x)
-        x = self.dropout(x)
+        # ConvBlock 4（大きい入力の場合のみ）
+        if not self.small_input:
+            x = self.conv4_1(x)
+            x = self.bn4_1(x)
+            x = self.elu4_1(x)
+            x = self.conv4_2(x)
+            x = self.bn4_2(x)
+            x = self.elu4_2(x)
+            x = self.pool4(x)
+            x = self.dropout(x)
         
         # ConvBlock 5
         x = self.conv5_1(x)
@@ -1105,7 +1191,7 @@ class PhysNet2DCNN_2D(nn.Module):
         x = self.bn5_2(x)
         x = self.elu5_2(x)
         
-        # Spatial pooling
+        # Adaptive Spatial pooling（どんなサイズでも対応）
         x = self.spatial_pool(x)
         x = x.view(batch_size, time_frames, 64)
         
@@ -1152,6 +1238,9 @@ def create_model(config):
         print(f"使用チャンネル: {config.use_channel}")
         if config.use_lab:
             print(f"LABデータ: 使用（RGB+LAB = {config.num_channels}チャンネル）")
+        else:
+            print(f"LABデータ: 未使用（RGB = {config.num_channels}チャンネル）")
+        print(f"訓練:検証データ比率: {config.train_val_split_ratio*100:.0f}:{(1-config.train_val_split_ratio)*100:.0f}")
         print(f"データ拡張: {'有効' if config.use_augmentation else '無効'}")
         if config.use_augmentation:
             print(f"  - ランダムクロップ: {'有効' if config.crop_enabled else '無効'}")
@@ -1168,7 +1257,7 @@ def create_model(config):
     return model
 
 # ================================
-# データ読み込み（LABデータサポート追加）
+# データ読み込み（LABサポート追加）
 # ================================
 def load_data_single_subject(subject, config):
     """単一被験者のデータを読み込み（LABデータ対応）"""
@@ -1201,28 +1290,46 @@ def load_data_single_subject(subject, config):
     
     # LABデータの読み込み（オプション）
     if config.use_lab:
-        lab_path = os.path.join(config.rgb_base_path, subject, 
-                                f"{subject}{config.lab_filename}")
+        # 従来モデル用のLABファイル名を使用
+        if config.model_type in ['standard', 'deep']:
+            lab_path = os.path.join(config.rgb_base_path, subject, 
+                                    f"{subject}{config.lab_filename}")
+        else:
+            # 3D/2Dモデル用（必要に応じて異なるファイル名を設定可能）
+            lab_path = os.path.join(config.rgb_base_path, subject, 
+                                    f"{subject}_LAB_video_data.npy")  # 例として
+            # もしLABデータが存在しない場合は従来のファイル名を試す
+            if not os.path.exists(lab_path):
+                lab_path = os.path.join(config.rgb_base_path, subject, 
+                                       f"{subject}{config.lab_filename}")
+        
         if not os.path.exists(lab_path):
             print(f"警告: {subject}のLABデータが見つかりません: {lab_path}")
-            return None, None
-        
-        lab_data = np.load(lab_path)
-        
-        # RGBとLABデータの形状を確認
-        if rgb_data.shape != lab_data.shape:
-            print(f"警告: {subject}のRGBとLABデータの形状が一致しません")
-            print(f"  RGB shape: {rgb_data.shape}, LAB shape: {lab_data.shape}")
-            return None, None
-        
-        # RGB+LABデータを結合（チャンネル次元で連結）
-        combined_data = np.concatenate([rgb_data, lab_data], axis=-1)
-        
-        # データの正規化（LABデータも0-1の範囲に）
-        if lab_data.max() > 1.0:
-            combined_data[..., 3:] = combined_data[..., 3:] / 255.0
-        
-        rgb_data = combined_data
+            print(f"  LABデータなしで処理を続行します。")
+            # LABデータなしで続行（RGBのみ使用）
+            config.use_lab = False
+            config.use_channel = 'RGB'
+            config.num_channels = 3
+        else:
+            lab_data = np.load(lab_path)
+            
+            # RGBとLABデータの形状を確認
+            if rgb_data.shape != lab_data.shape:
+                print(f"警告: {subject}のRGBとLABデータの形状が一致しません")
+                print(f"  RGB shape: {rgb_data.shape}, LAB shape: {lab_data.shape}")
+                # 形状が異なる場合もRGBのみで続行
+                config.use_lab = False
+                config.use_channel = 'RGB'
+                config.num_channels = 3
+            else:
+                # RGB+LABデータを結合（チャンネル次元で連結）
+                combined_data = np.concatenate([rgb_data, lab_data], axis=-1)
+                
+                # データの正規化（LABデータも0-1の範囲に）
+                if lab_data.max() > 1.0:
+                    combined_data[..., 3:] = combined_data[..., 3:] / 255.0
+                
+                rgb_data = combined_data
     
     # 信号データの読み込み
     signal_data_list = []
@@ -1244,7 +1351,7 @@ def load_data_single_subject(subject, config):
     return rgb_data, signal_data
 
 # ================================
-# 学習関数（変更なし）
+# 学習関数
 # ================================
 def train_model(model, train_loader, val_loader, config, fold=None, subject=None):
     """モデルの学習"""
@@ -1449,7 +1556,7 @@ def train_model(model, train_loader, val_loader, config, fold=None, subject=None
     return model, train_preds_best, train_targets_best
 
 # ================================
-# 評価関数（変更なし）
+# 評価関数
 # ================================
 def evaluate_model(model, test_loader, config):
     """モデルの評価"""
@@ -1503,12 +1610,13 @@ def evaluate_model(model, test_loader, config):
 # 6分割交差検証（改良版：1:9分割、均等サンプリング）
 # ================================
 def task_cross_validation(rgb_data, signal_data, config, subject, subject_save_dir):
-    """タスクごとの6分割交差検証（改良版）"""
+    """タスクごとの6分割交差検証（改良版：1:9分割、各タスクから均等に検証データ）"""
     
     fold_results = []
     all_test_predictions = []
     all_test_targets = []
     all_test_task_indices = []
+    all_test_tasks = []  # タスク名を記録
     
     for fold, test_task in enumerate(config.tasks):
         if config.verbose:
@@ -1534,9 +1642,9 @@ def task_cross_validation(rgb_data, signal_data, config, subject, subject_save_d
                 test_rgb_list.append(task_rgb)
                 test_signal_list.append(task_signal)
                 all_test_task_indices.extend([i] * config.task_duration)
+                all_test_tasks.extend([test_task] * config.task_duration)  # タスク名を記録
             else:
-                # 訓練データから10%を検証データとして分離
-                # 各タスクから均等に取る
+                # 訓練データから10%を検証データとして分離（各タスクから均等に取る）
                 val_size = int(config.task_duration * (1 - config.train_val_split_ratio))
                 
                 # 各タスクの最後の10%を検証データとする
@@ -1607,26 +1715,30 @@ def task_cross_validation(rgb_data, signal_data, config, subject, subject_save_d
         all_test_predictions.extend(test_results['predictions'])
         all_test_targets.extend(test_results['targets'])
         
-        # 各Foldのプロット
-        plot_fold_results(fold_results[-1], subject_save_dir)
+        # 各Foldのプロット（色分け対応）
+        plot_fold_results_colored(fold_results[-1], subject_save_dir, config)
     
     # テスト予測を元の順序に並び替え
     sorted_indices = np.argsort(all_test_task_indices)
     all_test_predictions = np.array(all_test_predictions)[sorted_indices]
     all_test_targets = np.array(all_test_targets)[sorted_indices]
+    all_test_tasks = np.array(all_test_tasks)[sorted_indices]
     
-    return fold_results, all_test_predictions, all_test_targets
+    return fold_results, all_test_predictions, all_test_targets, all_test_tasks
 
 # ================================
-# プロット関数（省略 - 元のコードと同じ）
+# プロット関数（色分け対応）
 # ================================
-def plot_fold_results(result, save_dir):
-    """各Foldの結果をプロット"""
+def plot_fold_results_colored(result, save_dir, config):
+    """各Foldの結果をプロット（色分け対応）"""
     fold = result['fold']
+    test_task = result['test_task']
+    task_color = config.task_colors[test_task]
     
     # 訓練データ散布図
     plt.figure(figsize=(10, 8))
-    plt.scatter(result['train_targets'], result['train_predictions'], alpha=0.5, s=10)
+    plt.scatter(result['train_targets'], result['train_predictions'], 
+                alpha=0.5, s=10, color='gray', label='訓練データ')
     min_val = min(result['train_targets'].min(), result['train_predictions'].min())
     max_val = max(result['train_targets'].max(), result['train_predictions'].max())
     plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2)
@@ -1634,25 +1746,28 @@ def plot_fold_results(result, save_dir):
     plt.ylabel('予測値')
     plt.title(f"Fold {fold} 訓練データ - MAE: {result['train_mae']:.3f}, Corr: {result['train_corr']:.3f}")
     plt.grid(True, alpha=0.3)
+    plt.legend()
     plt.tight_layout()
     plt.savefig(save_dir / f'fold{fold}_train_scatter.png', dpi=150, bbox_inches='tight')
     plt.close()
     
-    # テストデータ散布図
+    # テストデータ散布図（色分け）
     plt.figure(figsize=(10, 8))
-    plt.scatter(result['test_targets'], result['test_predictions'], alpha=0.5, s=10)
+    plt.scatter(result['test_targets'], result['test_predictions'], 
+                alpha=0.6, s=20, color=task_color, label=f'テストタスク: {test_task}')
     min_val = min(result['test_targets'].min(), result['test_predictions'].min())
     max_val = max(result['test_targets'].max(), result['test_predictions'].max())
     plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2)
     plt.xlabel('真値')
     plt.ylabel('予測値')
-    plt.title(f"Fold {fold} テストデータ ({result['test_task']}) - MAE: {result['test_mae']:.3f}, Corr: {result['test_corr']:.3f}")
+    plt.title(f"Fold {fold} テストデータ ({test_task}) - MAE: {result['test_mae']:.3f}, Corr: {result['test_corr']:.3f}")
     plt.grid(True, alpha=0.3)
+    plt.legend()
     plt.tight_layout()
     plt.savefig(save_dir / f'fold{fold}_test_scatter.png', dpi=150, bbox_inches='tight')
     plt.close()
     
-    # 波形比較
+    # 波形比較（色分け）
     plt.figure(figsize=(16, 8))
     plt.subplot(2, 1, 1)
     plt.plot(result['train_targets'], 'b-', label='真値', alpha=0.7, linewidth=1)
@@ -1665,10 +1780,11 @@ def plot_fold_results(result, save_dir):
     
     plt.subplot(2, 1, 2)
     plt.plot(result['test_targets'], 'b-', label='真値', alpha=0.7, linewidth=1)
-    plt.plot(result['test_predictions'], 'g-', label='予測', alpha=0.7, linewidth=1)
+    plt.plot(result['test_predictions'], color=task_color, linestyle='-', 
+             label=f'予測 ({test_task})', alpha=0.7, linewidth=1)
     plt.xlabel('時間 (秒)')
     plt.ylabel('信号値')
-    plt.title(f'Fold {fold} テストデータ波形 ({result["test_task"]})')
+    plt.title(f'Fold {fold} テストデータ波形 ({test_task})')
     plt.legend()
     plt.grid(True, alpha=0.3)
     
@@ -1676,9 +1792,9 @@ def plot_fold_results(result, save_dir):
     plt.savefig(save_dir / f'fold{fold}_waveforms.png', dpi=150, bbox_inches='tight')
     plt.close()
 
-def plot_subject_summary(fold_results, all_test_predictions, all_test_targets, 
-                         subject, subject_save_dir):
-    """被験者の全体結果をプロット"""
+def plot_subject_summary_colored(fold_results, all_test_predictions, all_test_targets, 
+                                all_test_tasks, subject, subject_save_dir, config):
+    """被験者の全体結果をプロット（タスクごとに色分け）"""
     
     # 全訓練データ統合
     all_train_predictions = np.concatenate([r['train_predictions'] for r in fold_results])
@@ -1692,7 +1808,7 @@ def plot_subject_summary(fold_results, all_test_predictions, all_test_targets,
     
     # 全訓練データ散布図
     plt.figure(figsize=(10, 8))
-    plt.scatter(all_train_targets, all_train_predictions, alpha=0.5, s=10)
+    plt.scatter(all_train_targets, all_train_predictions, alpha=0.5, s=10, color='gray')
     min_val = min(all_train_targets.min(), all_train_predictions.min())
     max_val = max(all_train_targets.max(), all_train_predictions.max())
     plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2)
@@ -1704,96 +1820,160 @@ def plot_subject_summary(fold_results, all_test_predictions, all_test_targets,
     plt.savefig(subject_save_dir / 'all_train_scatter.png', dpi=150, bbox_inches='tight')
     plt.close()
     
-    # 全テストデータ散布図
-    plt.figure(figsize=(10, 8))
-    plt.scatter(all_test_targets, all_test_predictions, alpha=0.5, s=10)
+    # 全テストデータ散布図（タスクごとに色分け）
+    plt.figure(figsize=(12, 8))
+    for task in config.tasks:
+        mask = all_test_tasks == task
+        if np.any(mask):
+            plt.scatter(all_test_targets[mask], all_test_predictions[mask], 
+                       alpha=0.6, s=20, color=config.task_colors[task], label=task)
+    
     min_val = min(all_test_targets.min(), all_test_predictions.min())
     max_val = max(all_test_targets.max(), all_test_predictions.max())
     plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2)
     plt.xlabel('真値')
     plt.ylabel('予測値')
     plt.title(f"{subject} 全テストデータ - MAE: {all_test_mae:.3f}, Corr: {all_test_corr:.3f}")
+    plt.legend(loc='upper left', bbox_to_anchor=(1.02, 1))
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig(subject_save_dir / 'all_test_scatter.png', dpi=150, bbox_inches='tight')
+    plt.savefig(subject_save_dir / 'all_test_scatter_colored.png', dpi=150, bbox_inches='tight')
     plt.close()
     
-    # 全テストデータ連結波形
-    plt.figure(figsize=(20, 6))
-    plt.plot(all_test_targets, 'b-', label='真値', alpha=0.7, linewidth=1)
-    plt.plot(all_test_predictions, 'g-', label='予測', alpha=0.7, linewidth=1)
+    # 全テストデータ連結波形（タスクごとに色分け）
+    plt.figure(figsize=(20, 8))
+    
+    # 真値を薄い色でプロット
+    plt.plot(all_test_targets, 'k-', label='真値', alpha=0.4, linewidth=1)
+    
+    # 予測値をタスクごとに色分けしてプロット
+    for i, task in enumerate(config.tasks):
+        start_idx = i * config.task_duration
+        end_idx = (i + 1) * config.task_duration
+        plt.plot(range(start_idx, end_idx), all_test_predictions[start_idx:end_idx], 
+                color=config.task_colors[task], label=f'予測 ({task})', 
+                alpha=0.8, linewidth=1.5)
     
     # タスク境界に縦線
     for i in range(1, 6):
-        plt.axvline(x=i*60, color='r', linestyle='--', alpha=0.5)
+        plt.axvline(x=i*60, color='gray', linestyle='--', alpha=0.5)
     
     plt.xlabel('時間 (秒)')
     plt.ylabel('信号値')
     plt.title(f'{subject} 全テストデータ連結波形 - MAE: {all_test_mae:.3f}, Corr: {all_test_corr:.3f}')
-    plt.legend()
+    plt.legend(loc='upper left', bbox_to_anchor=(1.02, 1))
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig(subject_save_dir / 'all_test_waveform.png', dpi=150, bbox_inches='tight')
+    plt.savefig(subject_save_dir / 'all_test_waveform_colored.png', dpi=150, bbox_inches='tight')
     plt.close()
     
     return all_train_mae, all_train_corr, all_test_mae, all_test_corr
 
-def plot_all_subjects_summary(all_subjects_results, config):
-    """全被験者のサマリープロット"""
+def plot_all_subjects_summary_unified(all_subjects_results, config):
+    """全被験者のサマリープロット（1つのグラフに統合）"""
     save_dir = Path(config.save_path)
     
-    # 被験者ごとのメトリクスを抽出
-    subjects = []
-    train_maes = []
-    train_corrs = []
-    test_maes = []
-    test_corrs = []
+    # カラーマップを準備（32人の被験者用）
+    colors = plt.cm.hsv(np.linspace(0, 1, len(all_subjects_results)))
     
-    for result in all_subjects_results:
-        subjects.append(result['subject'])
-        train_maes.append(result['train_mae'])
-        train_corrs.append(result['train_corr'])
-        test_maes.append(result['test_mae'])
-        test_corrs.append(result['test_corr'])
+    # 訓練データ：全被験者を1つのグラフにプロット
+    plt.figure(figsize=(14, 10))
+    for i, result in enumerate(all_subjects_results):
+        # 各被験者のデータを取得
+        all_train_predictions = np.concatenate([r['train_predictions'] for r in result['fold_results']])
+        all_train_targets = np.concatenate([r['train_targets'] for r in result['fold_results']])
+        
+        # 散布図をプロット
+        plt.scatter(all_train_targets, all_train_predictions, 
+                   alpha=0.3, s=5, color=colors[i], label=result['subject'])
     
-    # 全被験者の訓練データサマリー
-    fig, axes = plt.subplots(4, 8, figsize=(24, 12))
-    axes = axes.ravel()
+    # 対角線
+    all_min = min([np.concatenate([r['train_targets'] for r in res['fold_results']]).min() 
+                  for res in all_subjects_results])
+    all_max = max([np.concatenate([r['train_targets'] for r in res['fold_results']]).max() 
+                  for res in all_subjects_results])
+    plt.plot([all_min, all_max], [all_min, all_max], 'k--', lw=2, alpha=0.7)
     
-    for i, result in enumerate(all_subjects_results[:32]):
-        ax = axes[i]
-        ax.text(0.5, 0.5, f"{result['subject']}\nMAE: {result['train_mae']:.3f}\nCorr: {result['train_corr']:.3f}", 
-                ha='center', va='center', fontsize=9, transform=ax.transAxes)
-        ax.set_xlim(0, 1)
-        ax.set_ylim(0, 1)
-        ax.set_xticks([])
-        ax.set_yticks([])
-        ax.set_facecolor('#e8f4f8' if result['train_corr'] > 0.7 else '#f8e8e8')
+    plt.xlabel('真値')
+    plt.ylabel('予測値')
     
-    fig.suptitle(f'全被験者 訓練データ結果 - 平均MAE: {np.mean(train_maes):.3f}, 平均Corr: {np.mean(train_corrs):.3f}', 
-                 fontsize=14)
+    # 平均メトリクス
+    avg_train_mae = np.mean([r['train_mae'] for r in all_subjects_results])
+    avg_train_corr = np.mean([r['train_corr'] for r in all_subjects_results])
+    
+    plt.title(f'全被験者 訓練データ - 平均MAE: {avg_train_mae:.3f}, 平均Corr: {avg_train_corr:.3f}')
+    plt.grid(True, alpha=0.3)
+    
+    # 凡例を2列で右側に配置
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', ncol=2, fontsize=8)
     plt.tight_layout()
-    plt.savefig(save_dir / 'all_subjects_train_summary.png', dpi=150, bbox_inches='tight')
+    plt.savefig(save_dir / 'all_subjects_train_unified.png', dpi=150, bbox_inches='tight')
     plt.close()
     
-    # 全被験者のテストデータサマリー
-    fig, axes = plt.subplots(4, 8, figsize=(24, 12))
-    axes = axes.ravel()
+    # テストデータ：全被験者を1つのグラフにプロット
+    plt.figure(figsize=(14, 10))
+    for i, result in enumerate(all_subjects_results):
+        # 各被験者のテストデータを取得
+        all_test_predictions = result['all_test_predictions']
+        all_test_targets = result['all_test_targets']
+        
+        # 散布図をプロット
+        plt.scatter(all_test_targets, all_test_predictions, 
+                   alpha=0.4, s=8, color=colors[i], label=result['subject'])
     
-    for i, result in enumerate(all_subjects_results[:32]):
-        ax = axes[i]
-        ax.text(0.5, 0.5, f"{result['subject']}\nMAE: {result['test_mae']:.3f}\nCorr: {result['test_corr']:.3f}", 
-                ha='center', va='center', fontsize=9, transform=ax.transAxes)
-        ax.set_xlim(0, 1)
-        ax.set_ylim(0, 1)
-        ax.set_xticks([])
-        ax.set_yticks([])
-        ax.set_facecolor('#e8f4f8' if result['test_corr'] > 0.7 else '#f8e8e8')
+    # 対角線
+    all_min = min([res['all_test_targets'].min() for res in all_subjects_results])
+    all_max = max([res['all_test_targets'].max() for res in all_subjects_results])
+    plt.plot([all_min, all_max], [all_min, all_max], 'k--', lw=2, alpha=0.7)
     
-    fig.suptitle(f'全被験者 テストデータ結果 - 平均MAE: {np.mean(test_maes):.3f}, 平均Corr: {np.mean(test_corrs):.3f}', 
-                 fontsize=14)
+    plt.xlabel('真値')
+    plt.ylabel('予測値')
+    
+    # 平均メトリクス
+    avg_test_mae = np.mean([r['test_mae'] for r in all_subjects_results])
+    avg_test_corr = np.mean([r['test_corr'] for r in all_subjects_results])
+    
+    plt.title(f'全被験者 テストデータ - 平均MAE: {avg_test_mae:.3f}, 平均Corr: {avg_test_corr:.3f}')
+    plt.grid(True, alpha=0.3)
+    
+    # 凡例を2列で右側に配置
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', ncol=2, fontsize=8)
     plt.tight_layout()
-    plt.savefig(save_dir / 'all_subjects_test_summary.png', dpi=150, bbox_inches='tight')
+    plt.savefig(save_dir / 'all_subjects_test_unified.png', dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    # 被験者ごとのパフォーマンス比較（棒グラフ）
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(16, 10))
+    
+    subjects = [r['subject'] for r in all_subjects_results]
+    train_corrs = [r['train_corr'] for r in all_subjects_results]
+    test_corrs = [r['test_corr'] for r in all_subjects_results]
+    
+    x = np.arange(len(subjects))
+    
+    # 訓練相関
+    bars1 = ax1.bar(x, train_corrs, color=colors)
+    ax1.axhline(y=avg_train_corr, color='r', linestyle='--', label=f'平均: {avg_train_corr:.3f}')
+    ax1.set_ylabel('相関係数')
+    ax1.set_title('訓練データ相関')
+    ax1.set_ylim([0, 1])
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    
+    # テスト相関
+    bars2 = ax2.bar(x, test_corrs, color=colors)
+    ax2.axhline(y=avg_test_corr, color='r', linestyle='--', label=f'平均: {avg_test_corr:.3f}')
+    ax2.set_ylabel('相関係数')
+    ax2.set_xlabel('被験者')
+    ax2.set_title('テストデータ相関')
+    ax2.set_xticks(x)
+    ax2.set_xticklabels(subjects, rotation=45, ha='right')
+    ax2.set_ylim([0, 1])
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(save_dir / 'all_subjects_performance_comparison.png', dpi=150, bbox_inches='tight')
     plt.close()
 
 # ================================
@@ -1809,7 +1989,7 @@ def main():
     print(f"モデルタイプ: {config.model_type}")
     print(f"チャンネル: {config.use_channel}")
     if config.use_lab:
-        print(f"LABデータ: 使用（合計{config.num_channels}チャンネル）")
+        print(f"LABデータ: 使用（RGB+LAB = {config.num_channels}チャンネル）")
     else:
         print(f"LABデータ: 未使用")
     print(f"訓練:検証データ比率: {config.train_val_split_ratio*100:.0f}:{(1-config.train_val_split_ratio)*100:.0f}")
@@ -1850,18 +2030,18 @@ def main():
                 continue
             
             print(f"  データ形状: RGB={rgb_data.shape}, Signal={signal_data.shape}")
-            if config.use_lab:
+            if config.use_lab and rgb_data.shape[-1] == 6:
                 print(f"  チャンネル構成: RGB(3) + LAB(3) = {rgb_data.shape[-1]}チャンネル")
             
-            # 6分割交差検証実行
-            fold_results, all_test_predictions, all_test_targets = task_cross_validation(
+            # 6分割交差検証実行（色分け対応、改良版分割）
+            fold_results, all_test_predictions, all_test_targets, all_test_tasks = task_cross_validation(
                 rgb_data, signal_data, config, subject, subject_save_dir
             )
             
-            # 被験者全体のサマリープロット
-            train_mae, train_corr, test_mae, test_corr = plot_subject_summary(
-                fold_results, all_test_predictions, all_test_targets, 
-                subject, subject_save_dir
+            # 被験者全体のサマリープロット（色分け対応）
+            train_mae, train_corr, test_mae, test_corr = plot_subject_summary_colored(
+                fold_results, all_test_predictions, all_test_targets, all_test_tasks,
+                subject, subject_save_dir, config
             )
             
             # 結果保存
@@ -1871,7 +2051,10 @@ def main():
                 'train_corr': train_corr,
                 'test_mae': test_mae,
                 'test_corr': test_corr,
-                'fold_results': fold_results
+                'fold_results': fold_results,
+                'all_test_predictions': all_test_predictions,
+                'all_test_targets': all_test_targets,
+                'all_test_tasks': all_test_tasks
             })
             
             print(f"\n  {subject} 完了:")
@@ -1884,11 +2067,11 @@ def main():
             traceback.print_exc()
             continue
     
-    # 全被験者のサマリープロット
+    # 全被験者のサマリープロット（統合版）
     if all_subjects_results:
         print(f"\n{'='*60}")
         print("全被験者サマリー作成中...")
-        plot_all_subjects_summary(all_subjects_results, config)
+        plot_all_subjects_summary_unified(all_subjects_results, config)
         
         # 統計サマリー
         avg_train_mae = np.mean([r['train_mae'] for r in all_subjects_results])
