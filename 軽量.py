@@ -2058,6 +2058,190 @@ def plot_fold_results_colored(result, save_dir, config):
     plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2)
     plt.xlabel('真値')
     plt.ylabel('予測値')
+    plt.title(f"Fold {fold} 訓練データ - MAE: {result['train_mae']:.3f}, Corr: {result['train_corr']:.3f}")
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(save_dir / f'fold{fold}_train_scatter.png', dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    # テストデータ散布図（色分け）
+    plt.figure(figsize=(10, 8))
+    plt.scatter(result['test_targets'], result['test_predictions'], 
+                alpha=0.6, s=20, color=task_color, label=f'テストタスク: {test_task}')
+    min_val = min(result['test_targets'].min(), result['test_predictions'].min())
+    max_val = max(result['test_targets'].max(), result['test_predictions'].max())
+    plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2)
+    plt.xlabel('真値')
+    plt.ylabel('予測値')
+    plt.title(f"Fold {fold} テストデータ ({test_task}) - MAE: {result['test_mae']:.3f}, Corr: {result['test_corr']:.3f}")
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(save_dir / f'fold{fold}_test_scatter.png', dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    # 波形比較（色分け）
+    plt.figure(figsize=(16, 8))
+    plt.subplot(2, 1, 1)
+    plt.plot(result['train_targets'], 'b-', label='真値', alpha=0.7, linewidth=1)
+    plt.plot(result['train_predictions'], 'g-', label='予測', alpha=0.7, linewidth=1)
+    plt.xlabel('時間 (秒)')
+    plt.ylabel('信号値')
+    plt.title(f'Fold {fold} 訓練データ波形')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    plt.subplot(2, 1, 2)
+    plt.plot(result['test_targets'], 'b-', label='真値', alpha=0.7, linewidth=1)
+    plt.plot(result['test_predictions'], color=task_color, linestyle='-', 
+             label=f'予測 ({test_task})', alpha=0.7, linewidth=1)
+    plt.xlabel('時間 (秒)')
+    plt.ylabel('信号値')
+    plt.title(f'Fold {fold} テストデータ波形 ({test_task})')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(save_dir / f'fold{fold}_waveforms.png', dpi=150, bbox_inches='tight')
+    plt.close()
+
+def plot_subject_summary_colored(fold_results, all_test_predictions, all_test_targets, 
+                                all_test_tasks, subject, subject_save_dir, config):
+    """被験者の全体結果をプロット（タスクごとに色分け）"""
+    
+    # 全訓練データ統合
+    all_train_predictions = np.concatenate([r['train_predictions'] for r in fold_results])
+    all_train_targets = np.concatenate([r['train_targets'] for r in fold_results])
+    all_train_mae = mean_absolute_error(all_train_targets, all_train_predictions)
+    all_train_corr, _ = pearsonr(all_train_targets, all_train_predictions)
+    
+    # 全テストデータメトリクス
+    all_test_mae = mean_absolute_error(all_test_targets, all_test_predictions)
+    all_test_corr, _ = pearsonr(all_test_targets, all_test_predictions)
+    
+    # 全訓練データ散布図
+    plt.figure(figsize=(10, 8))
+    plt.scatter(all_train_targets, all_train_predictions, alpha=0.5, s=10, color='gray')
+    min_val = min(all_train_targets.min(), all_train_predictions.min())
+    max_val = max(all_train_targets.max(), all_train_predictions.max())
+    plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2)
+    plt.xlabel('真値')
+    plt.ylabel('予測値')
+    plt.title(f"{subject} 全訓練データ - MAE: {all_train_mae:.3f}, Corr: {all_train_corr:.3f}")
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(subject_save_dir / 'all_train_scatter.png', dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    # 全テストデータ散布図（タスクごとに色分け）
+    plt.figure(figsize=(12, 8))
+    for task in config.tasks:
+        mask = all_test_tasks == task
+        if np.any(mask):
+            plt.scatter(all_test_targets[mask], all_test_predictions[mask], 
+                       alpha=0.6, s=20, color=config.task_colors[task], label=task)
+    
+    min_val = min(all_test_targets.min(), all_test_predictions.min())
+    max_val = max(all_test_targets.max(), all_test_predictions.max())
+    plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2)
+    plt.xlabel('真値')
+    plt.ylabel('予測値')
+    plt.title(f"{subject} 全テストデータ - MAE: {all_test_mae:.3f}, Corr: {all_test_corr:.3f}")
+    plt.legend(loc='upper left', bbox_to_anchor=(1.02, 1))
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(subject_save_dir / 'all_test_scatter_colored.png', dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    # 全テストデータ連結波形（タスクごとに色分け）
+    plt.figure(figsize=(20, 8))
+    
+    # 真値を薄い色でプロット
+    plt.plot(all_test_targets, 'k-', label='真値', alpha=0.4, linewidth=1)
+    
+    # 予測値をタスクごとに色分けしてプロット
+    for i, task in enumerate(config.tasks):
+        start_idx = i * config.task_duration
+        end_idx = (i + 1) * config.task_duration
+        plt.plot(range(start_idx, end_idx), all_test_predictions[start_idx:end_idx], 
+                color=config.task_colors[task], label=f'予測 ({task})', 
+                alpha=0.8, linewidth=1.5)
+    
+    # タスク境界に縦線
+    for i in range(1, 6):
+        plt.axvline(x=i*60, color='gray', linestyle='--', alpha=0.5)
+    
+    plt.xlabel('時間 (秒)')
+    plt.ylabel('信号値')
+    plt.title(f'{subject} 全テストデータ連結波形 - MAE: {all_test_mae:.3f}, Corr: {all_test_corr:.3f}')
+    plt.legend(loc='upper left', bbox_to_anchor=(1.02, 1))
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(subject_save_dir / 'all_test_waveform_colored.png', dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    return all_train_mae, all_train_corr, all_test_mae, all_test_corr
+
+def plot_all_subjects_summary_unified(all_subjects_results, config):
+    """全被験者のサマリープロット（1つのグラフに統合）"""
+    save_dir = Path(config.save_path)
+    
+    # カラーマップを準備（32人の被験者用）
+    colors = plt.cm.hsv(np.linspace(0, 1, len(all_subjects_results)))
+    
+    # 訓練データ：全被験者を1つのグラフにプロット
+    plt.figure(figsize=(14, 10))
+    for i, result in enumerate(all_subjects_results):
+        # 各被験者のデータを取得
+        all_train_predictions = np.concatenate([r['train_predictions'] for r in result['fold_results']])
+        all_train_targets = np.concatenate([r['train_targets'] for r in result['fold_results']])
+        
+        # 散布図をプロット
+        plt.scatter(all_train_targets, all_train_predictions, 
+                   alpha=0.3, s=5, color=colors[i], label=result['subject'])
+    
+    # 対角線
+    all_min = min([np.concatenate([r['train_targets'] for r in res['fold_results']]).min() 
+                  for res in all_subjects_results])
+    all_max = max([np.concatenate([r['train_targets'] for r in res['fold_results']]).max() 
+                  for res in all_subjects_results])
+    plt.plot([all_min, all_max], [all_min, all_max], 'k--', lw=2, alpha=0.7)
+    
+    plt.xlabel('真値')
+    plt.ylabel('予測値')
+    
+    # 平均メトリクス
+    avg_train_mae = np.mean([r['train_mae'] for r in all_subjects_results])
+    avg_train_corr = np.mean([r['train_corr'] for r in all_subjects_results])
+    
+    plt.title(f'全被験者 訓練データ - 平均MAE: {avg_train_mae:.3f}, 平均Corr: {avg_train_corr:.3f}')
+    plt.grid(True, alpha=0.3)
+    
+    # 凡例を2列で右側に配置
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', ncol=2, fontsize=8)
+    plt.tight_layout()
+    plt.savefig(save_dir / 'all_subjects_train_unified.png', dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    # テストデータ：全被験者を1つのグラフにプロット
+    plt.figure(figsize=(14, 10))
+    for i, result in enumerate(all_subjects_results):
+        # 各被験者のテストデータを取得
+        all_test_predictions = result['all_test_predictions']
+        all_test_targets = result['all_test_targets']
+        
+        # 散布図をプロット
+        plt.scatter(all_test_targets, all_test_predictions, 
+                   alpha=0.4, s=8, color=colors[i], label=result['subject'])
+    
+    # 対角線
+    all_min = min([res['all_test_targets'].min() for res in all_subjects_results])
+    all_max = max([res['all_test_targets'].max() for res in all_subjects_results])
+    plt.plot([all_min, all_max], [all_min, all_max], 'k--', lw=2, alpha=0.7)
+    
+    plt.xlabel('真値')
+    plt.ylabel('予測値')
     
     # 平均メトリクス
     avg_test_mae = np.mean([r['test_mae'] for r in all_subjects_results])
@@ -2314,187 +2498,3 @@ def main():
 if __name__ == "__main__":
     # メイン実行
     main()
-    plt.ylabel('予測値')
-    plt.title(f"Fold {fold} 訓練データ - MAE: {result['train_mae']:.3f}, Corr: {result['train_corr']:.3f}")
-    plt.grid(True, alpha=0.3)
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(save_dir / f'fold{fold}_train_scatter.png', dpi=150, bbox_inches='tight')
-    plt.close()
-    
-    # テストデータ散布図（色分け）
-    plt.figure(figsize=(10, 8))
-    plt.scatter(result['test_targets'], result['test_predictions'], 
-                alpha=0.6, s=20, color=task_color, label=f'テストタスク: {test_task}')
-    min_val = min(result['test_targets'].min(), result['test_predictions'].min())
-    max_val = max(result['test_targets'].max(), result['test_predictions'].max())
-    plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2)
-    plt.xlabel('真値')
-    plt.ylabel('予測値')
-    plt.title(f"Fold {fold} テストデータ ({test_task}) - MAE: {result['test_mae']:.3f}, Corr: {result['test_corr']:.3f}")
-    plt.grid(True, alpha=0.3)
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(save_dir / f'fold{fold}_test_scatter.png', dpi=150, bbox_inches='tight')
-    plt.close()
-    
-    # 波形比較（色分け）
-    plt.figure(figsize=(16, 8))
-    plt.subplot(2, 1, 1)
-    plt.plot(result['train_targets'], 'b-', label='真値', alpha=0.7, linewidth=1)
-    plt.plot(result['train_predictions'], 'g-', label='予測', alpha=0.7, linewidth=1)
-    plt.xlabel('時間 (秒)')
-    plt.ylabel('信号値')
-    plt.title(f'Fold {fold} 訓練データ波形')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    
-    plt.subplot(2, 1, 2)
-    plt.plot(result['test_targets'], 'b-', label='真値', alpha=0.7, linewidth=1)
-    plt.plot(result['test_predictions'], color=task_color, linestyle='-', 
-             label=f'予測 ({test_task})', alpha=0.7, linewidth=1)
-    plt.xlabel('時間 (秒)')
-    plt.ylabel('信号値')
-    plt.title(f'Fold {fold} テストデータ波形 ({test_task})')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    plt.savefig(save_dir / f'fold{fold}_waveforms.png', dpi=150, bbox_inches='tight')
-    plt.close()
-
-def plot_subject_summary_colored(fold_results, all_test_predictions, all_test_targets, 
-                                all_test_tasks, subject, subject_save_dir, config):
-    """被験者の全体結果をプロット（タスクごとに色分け）"""
-    
-    # 全訓練データ統合
-    all_train_predictions = np.concatenate([r['train_predictions'] for r in fold_results])
-    all_train_targets = np.concatenate([r['train_targets'] for r in fold_results])
-    all_train_mae = mean_absolute_error(all_train_targets, all_train_predictions)
-    all_train_corr, _ = pearsonr(all_train_targets, all_train_predictions)
-    
-    # 全テストデータメトリクス
-    all_test_mae = mean_absolute_error(all_test_targets, all_test_predictions)
-    all_test_corr, _ = pearsonr(all_test_targets, all_test_predictions)
-    
-    # 全訓練データ散布図
-    plt.figure(figsize=(10, 8))
-    plt.scatter(all_train_targets, all_train_predictions, alpha=0.5, s=10, color='gray')
-    min_val = min(all_train_targets.min(), all_train_predictions.min())
-    max_val = max(all_train_targets.max(), all_train_predictions.max())
-    plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2)
-    plt.xlabel('真値')
-    plt.ylabel('予測値')
-    plt.title(f"{subject} 全訓練データ - MAE: {all_train_mae:.3f}, Corr: {all_train_corr:.3f}")
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(subject_save_dir / 'all_train_scatter.png', dpi=150, bbox_inches='tight')
-    plt.close()
-    
-    # 全テストデータ散布図（タスクごとに色分け）
-    plt.figure(figsize=(12, 8))
-    for task in config.tasks:
-        mask = all_test_tasks == task
-        if np.any(mask):
-            plt.scatter(all_test_targets[mask], all_test_predictions[mask], 
-                       alpha=0.6, s=20, color=config.task_colors[task], label=task)
-    
-    min_val = min(all_test_targets.min(), all_test_predictions.min())
-    max_val = max(all_test_targets.max(), all_test_predictions.max())
-    plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2)
-    plt.xlabel('真値')
-    plt.ylabel('予測値')
-    plt.title(f"{subject} 全テストデータ - MAE: {all_test_mae:.3f}, Corr: {all_test_corr:.3f}")
-    plt.legend(loc='upper left', bbox_to_anchor=(1.02, 1))
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(subject_save_dir / 'all_test_scatter_colored.png', dpi=150, bbox_inches='tight')
-    plt.close()
-    
-    # 全テストデータ連結波形（タスクごとに色分け）
-    plt.figure(figsize=(20, 8))
-    
-    # 真値を薄い色でプロット
-    plt.plot(all_test_targets, 'k-', label='真値', alpha=0.4, linewidth=1)
-    
-    # 予測値をタスクごとに色分けしてプロット
-    for i, task in enumerate(config.tasks):
-        start_idx = i * config.task_duration
-        end_idx = (i + 1) * config.task_duration
-        plt.plot(range(start_idx, end_idx), all_test_predictions[start_idx:end_idx], 
-                color=config.task_colors[task], label=f'予測 ({task})', 
-                alpha=0.8, linewidth=1.5)
-    
-    # タスク境界に縦線
-    for i in range(1, 6):
-        plt.axvline(x=i*60, color='gray', linestyle='--', alpha=0.5)
-    
-    plt.xlabel('時間 (秒)')
-    plt.ylabel('信号値')
-    plt.title(f'{subject} 全テストデータ連結波形 - MAE: {all_test_mae:.3f}, Corr: {all_test_corr:.3f}')
-    plt.legend(loc='upper left', bbox_to_anchor=(1.02, 1))
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(subject_save_dir / 'all_test_waveform_colored.png', dpi=150, bbox_inches='tight')
-    plt.close()
-    
-    return all_train_mae, all_train_corr, all_test_mae, all_test_corr
-
-def plot_all_subjects_summary_unified(all_subjects_results, config):
-    """全被験者のサマリープロット（1つのグラフに統合）"""
-    save_dir = Path(config.save_path)
-    
-    # カラーマップを準備（32人の被験者用）
-    colors = plt.cm.hsv(np.linspace(0, 1, len(all_subjects_results)))
-    
-    # 訓練データ：全被験者を1つのグラフにプロット
-    plt.figure(figsize=(14, 10))
-    for i, result in enumerate(all_subjects_results):
-        # 各被験者のデータを取得
-        all_train_predictions = np.concatenate([r['train_predictions'] for r in result['fold_results']])
-        all_train_targets = np.concatenate([r['train_targets'] for r in result['fold_results']])
-        
-        # 散布図をプロット
-        plt.scatter(all_train_targets, all_train_predictions, 
-                   alpha=0.3, s=5, color=colors[i], label=result['subject'])
-    
-    # 対角線
-    all_min = min([np.concatenate([r['train_targets'] for r in res['fold_results']]).min() 
-                  for res in all_subjects_results])
-    all_max = max([np.concatenate([r['train_targets'] for r in res['fold_results']]).max() 
-                  for res in all_subjects_results])
-    plt.plot([all_min, all_max], [all_min, all_max], 'k--', lw=2, alpha=0.7)
-    
-    plt.xlabel('真値')
-    plt.ylabel('予測値')
-    
-    # 平均メトリクス
-    avg_train_mae = np.mean([r['train_mae'] for r in all_subjects_results])
-    avg_train_corr = np.mean([r['train_corr'] for r in all_subjects_results])
-    
-    plt.title(f'全被験者 訓練データ - 平均MAE: {avg_train_mae:.3f}, 平均Corr: {avg_train_corr:.3f}')
-    plt.grid(True, alpha=0.3)
-    
-    # 凡例を2列で右側に配置
-    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', ncol=2, fontsize=8)
-    plt.tight_layout()
-    plt.savefig(save_dir / 'all_subjects_train_unified.png', dpi=150, bbox_inches='tight')
-    plt.close()
-    
-    # テストデータ：全被験者を1つのグラフにプロット
-    plt.figure(figsize=(14, 10))
-    for i, result in enumerate(all_subjects_results):
-        # 各被験者のテストデータを取得
-        all_test_predictions = result['all_test_predictions']
-        all_test_targets = result['all_test_targets']
-        
-        # 散布図をプロット
-        plt.scatter(all_test_targets, all_test_predictions, 
-                   alpha=0.4, s=8, color=colors[i], label=result['subject'])
-    
-    # 対角線
-    all_min = min([res['all_test_targets'].min() for res in all_subjects_results])
-    all_max = max([res['all_test_targets'].max() for res in all_subjects_results])
-    plt.plot([all_min, all_max], [all_min, all_max], 'k--', lw=2, alpha=0.7)
-    
-    plt.xlabel('真値')
