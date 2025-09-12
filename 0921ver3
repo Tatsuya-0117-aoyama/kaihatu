@@ -1259,50 +1259,57 @@ def create_model(config):
 def load_data_single_subject(subject, config):
     """単一被験者のデータを読み込み（LABデータ対応）"""
     
-    # 全モデル共通でdownsampled_1Hz.npyを使用
+    # すべてのモデルで同じRGBデータファイルを使用
     rgb_path = os.path.join(config.rgb_base_path, subject, 
                             f"{subject}_downsampled_1Hz.npy")
-    
     if not os.path.exists(rgb_path):
         print(f"警告: {subject}のRGBデータが見つかりません: {rgb_path}")
         return None, None
     
-    rgb_data = np.load(rgb_path)  # (360, 14, 16, 3)の形状
-    print(f"  RGBデータ読み込み: {rgb_path}")
-    print(f"  RGBデータ形状: {rgb_data.shape}")
+    rgb_data = np.load(rgb_path)  # Shape: (360, 14, 16, 3)
+    print(f"  RGBデータ読み込み成功: {rgb_data.shape}")
     
-    # LABデータの読み込み
+    # LABデータの読み込み（オプション）
     if config.use_lab:
+        # LABデータは同じディレクトリの _downsampled_1Hzver2.npy
         lab_path = os.path.join(config.rgb_base_path, subject, 
                                 f"{subject}_downsampled_1Hzver2.npy")
         
         if not os.path.exists(lab_path):
             print(f"警告: {subject}のLABデータが見つかりません: {lab_path}")
             print(f"  LABデータなしで処理を続行します。")
+            # LABデータなしで続行（RGBのみ使用）
             config.use_lab = False
             config.use_channel = 'RGB'
             config.num_channels = 3
         else:
             lab_data = np.load(lab_path)
-            print(f"  LABデータ読み込み: {lab_path}")
-            print(f"  LABデータ形状: {lab_data.shape}")
+            print(f"  LABデータ読み込み成功: {lab_data.shape}")
             
             # RGBとLABデータの形状を確認
             if rgb_data.shape != lab_data.shape:
-                print(f"警告: RGBとLABデータの形状が一致しません")
+                print(f"警告: {subject}のRGBとLABデータの形状が一致しません")
+                print(f"  RGB shape: {rgb_data.shape}, LAB shape: {lab_data.shape}")
+                # 形状が異なる場合もRGBのみで続行
                 config.use_lab = False
                 config.use_channel = 'RGB'
                 config.num_channels = 3
             else:
-                # RGB+LABデータを結合
+                # RGB+LABデータを結合（チャンネル次元で連結）
                 combined_data = np.concatenate([rgb_data, lab_data], axis=-1)
-                print(f"  RGB+LAB結合データ形状: {combined_data.shape}")
+                print(f"  RGB+LAB結合データ: {combined_data.shape}")
                 
-                # LABデータの正規化
+                # データの正規化（LABデータも0-1の範囲に）
                 if lab_data.max() > 1.0:
                     combined_data[..., 3:] = combined_data[..., 3:] / 255.0
                 
-                rgb_data = combined_data  # (360, 14, 16, 6)
+                rgb_data = combined_data
+    
+    # 3D/2Dモデル用にデータ形状を調整
+    if config.model_type in ['3d', '2d']:
+        # (360, 14, 16, C) -> そのまま使用（時間次元として扱う）
+        # CalibrationPhys準拠モデルでは最初の次元を時間として扱う
+        pass  # データ形状の調整は不要
     
     # 信号データの読み込み
     signal_data_list = []
@@ -1311,17 +1318,17 @@ def load_data_single_subject(subject, config):
                                   config.signal_type, 
                                   f"{config.signal_prefix}_{task}.npy")
         if not os.path.exists(signal_path):
-            print(f"警告: {subject}の{task}の信号データが見つかりません")
+            print(f"警告: {subject}の{task}の{config.signal_type}データが見つかりません")
             return None, None
         signal_data_list.append(np.load(signal_path))
     
-    signal_data = np.concatenate(signal_data_list)  # (360,)の形状
+    signal_data = np.concatenate(signal_data_list)
     
-    # データの正規化
-    if rgb_data[..., :3].max() > 1.0:
+    # データの正規化（0-1の範囲に）
+    if rgb_data[..., :3].max() > 1.0:  # RGBチャンネルのみチェック
         rgb_data[..., :3] = rgb_data[..., :3] / 255.0
     
-    return rgb_data, signal_data  # (360, 14, 16, C), (360,)
+    return rgb_data, signal_data
 
 # ================================
 # 学習関数
