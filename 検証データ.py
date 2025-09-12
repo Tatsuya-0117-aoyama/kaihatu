@@ -15,12 +15,42 @@ import os
 from pathlib import Path
 from datetime import datetime
 import warnings
+import random
 warnings.filterwarnings('ignore')
 
 # フォント設定（メイリオ）
 plt.rcParams['font.sans-serif'] = ['Meiryo', 'Yu Gothic', 'Hiragino Sans', 'MS Gothic']
 plt.rcParams['axes.unicode_minus'] = False
 mpl.rcParams['font.size'] = 10
+
+# ================================
+# 完全な再現性のための乱数シード設定関数
+# ================================
+def set_all_seeds(seed=42):
+    """完全な再現性のための乱数シード設定"""
+    # Python標準の乱数
+    random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    
+    # NumPy
+    np.random.seed(seed)
+    
+    # PyTorch
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    
+    # CuDNNの決定的動作
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    
+    # データローダーのワーカー初期化
+    def seed_worker(worker_id):
+        worker_seed = torch.initial_seed() % 2**32
+        np.random.seed(worker_seed)
+        random.seed(worker_seed)
+    
+    return seed_worker
 
 # ================================
 # 設定クラス
@@ -37,26 +67,22 @@ class Config:
         self.save_path = os.path.join(self.base_save_path, self.timestamp)
         
         # ================================
-        # LAB変換データ使用設定（新規追加）
+        # LAB変換データ使用設定
         # ================================
         self.use_lab = True  # LABデータを使用するか（True: RGB+LAB, False: RGBのみ）
         self.lab_filename = "_downsampled_1Hzver2.npy"  # LABデータのファイル名
         
         # ================================
-        # 訓練・検証分割設定（修正版）
+        # 訓練・検証分割設定
         # ================================
         self.train_val_split_ratio = 0.9  # 訓練データの割合（90%）→1:9分割
         
-        # 検証データ分割戦略（新規追加）
-        # 'sequential': 各タスクの最後10%を検証データに（元の方法）
-        # 'stratified': 信号値ベースの層化サンプリング
+        # 検証データ分割戦略
         self.validation_split_strategy = 'stratified'  # 'sequential' または 'stratified'
         
         # 層化サンプリング設定（stratified選択時のみ使用）
         self.n_strata = 5  # 層の数（信号値を5つの範囲に分割）
         self.stratification_method = 'quantile'  # 'equal_range' or 'quantile'
-        # equal_range: 信号値の範囲を等間隔に分割
-        # quantile: 各層のサンプル数が均等になるように分割（推奨）
         
         # 血行動態信号タイプ設定
         self.signal_type = "CO"  # "CO", "HbO", "HbR", "HbT" など
@@ -80,17 +106,12 @@ class Config:
         }
         
         # モデルタイプ選択
-        # "standard": 元のモデル（5ブロック構成）
-        # "deep": 深いモデル（8ブロック構成）
-        # "3d": CalibrationPhys準拠 3D畳み込みモデル
-        # "2d": CalibrationPhys準拠 2D畳み込みモデル（効率版）
-        self.model_type = "3d"  # デフォルトは3Dモデル
+        self.model_type = "3d"  # "standard", "deep", "3d", "2d"
         
         # 使用チャンネル設定（LAB使用時は自動設定）
         if self.use_lab:
             self.use_channel = 'RGB+LAB'  # LAB使用時はRGB+LAB（6チャンネル）
         else:
-            # 'R', 'G', 'B', 'RGB', 'RG', 'GB', 'RB'
             self.use_channel = 'RGB'
         
         # チャンネル数の自動計算
@@ -144,19 +165,23 @@ class Config:
             self.time_stretch_enabled = False
             self.brightness_contrast_enabled = False
         
+        # ================================
         # 学習設定（モデルタイプに応じて自動調整）
+        # ================================
         if self.model_type == "standard":
             self.batch_size = 16
             self.epochs = 100
             self.learning_rate = 0.001
             self.weight_decay = 1e-5
             self.patience = 20
+            self.gradient_clip_val = 1.0
         elif self.model_type == "deep":
             self.batch_size = 32
             self.epochs = 200
             self.learning_rate = 0.001
             self.weight_decay = 1e-4
             self.patience = 40
+            self.gradient_clip_val = 0.5
         elif self.model_type == "3d":
             # 3Dモデルはメモリを多く使うため小さめのバッチサイズ
             self.batch_size = 8
@@ -164,6 +189,7 @@ class Config:
             self.learning_rate = 0.001
             self.weight_decay = 1e-4
             self.patience = 30
+            self.gradient_clip_val = 0.5
         elif self.model_type == "2d":
             # 2Dモデルは効率的なので大きめのバッチサイズ可能
             self.batch_size = 16
@@ -171,6 +197,7 @@ class Config:
             self.learning_rate = 0.001
             self.weight_decay = 1e-4
             self.patience = 30
+            self.gradient_clip_val = 0.5
         else:
             # デフォルト設定
             self.batch_size = 16
@@ -178,8 +205,15 @@ class Config:
             self.learning_rate = 0.001
             self.weight_decay = 1e-5
             self.patience = 20
+            self.gradient_clip_val = 1.0
         
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        # ================================
+        # Warmup設定（新規追加）
+        # ================================
+        self.warmup_epochs = 5
+        self.warmup_lr_factor = 0.1  # 初期学習率を1/10からスタート
         
         # 損失関数設定
         self.loss_type = "combined"  # "mse", "combined", "huber_combined"
@@ -190,6 +224,10 @@ class Config:
         self.scheduler_type = "cosine"  # "cosine", "onecycle", "plateau"
         self.scheduler_T0 = 30 if self.model_type != "standard" else 20
         self.scheduler_T_mult = 2 if self.model_type != "standard" else 1
+        
+        # Early Stopping改善設定
+        self.patience_improvement_threshold = 0.995  # 0.5%以上の改善を要求
+        self.min_delta = 0.0001  # 最小改善量
         
         # 表示設定
         self.verbose = True
@@ -468,7 +506,7 @@ class HuberCorrelationLoss(nn.Module):
         return total_loss, huber_loss, corr_loss
 
 # ================================
-# チャンネル選択ユーティリティ（LABサポート追加）
+# チャンネル選択ユーティリティ
 # ================================
 def select_channels(data, use_channel):
     """
@@ -504,7 +542,7 @@ def select_channels(data, use_channel):
         raise ValueError(f"Unknown channel type: {use_channel}")
 
 # ================================
-# 層化サンプリング関数（新規追加）
+# 層化サンプリング関数
 # ================================
 def stratified_sampling_split(task_rgb, task_signal, val_ratio=0.1, n_strata=5, method='quantile'):
     """
@@ -691,7 +729,7 @@ class CODataset(Dataset):
         return rgb_tensor, signal_tensor
 
 # ================================
-# オリジナルのPhysNet2DCNNモデル
+# オリジナルのPhysNet2DCNNモデル（重み初期化追加）
 # ================================
 class PhysNet2DCNN(nn.Module):
     """オリジナルのPhysNet2DCNN（5ブロック構成）"""
@@ -703,10 +741,10 @@ class PhysNet2DCNN(nn.Module):
         # ConvBlock 1
         self.conv_block1 = nn.Sequential(
             nn.Conv1d(in_channels, 32, kernel_size=5, padding=2),
-            nn.BatchNorm1d(32),
+            nn.BatchNorm1d(32, momentum=0.01, eps=1e-5),
             nn.ELU(),
             nn.Conv1d(32, 32, kernel_size=5, padding=2),
-            nn.BatchNorm1d(32),
+            nn.BatchNorm1d(32, momentum=0.01, eps=1e-5),
             nn.ELU()
         )
         self.avgpool1 = nn.AvgPool1d(kernel_size=2, stride=2)
@@ -714,10 +752,10 @@ class PhysNet2DCNN(nn.Module):
         # ConvBlock 2
         self.conv_block2 = nn.Sequential(
             nn.Conv1d(32, 64, kernel_size=3, padding=1),
-            nn.BatchNorm1d(64),
+            nn.BatchNorm1d(64, momentum=0.01, eps=1e-5),
             nn.ELU(),
             nn.Conv1d(64, 64, kernel_size=3, padding=1),
-            nn.BatchNorm1d(64),
+            nn.BatchNorm1d(64, momentum=0.01, eps=1e-5),
             nn.ELU()
         )
         self.avgpool2 = nn.AvgPool1d(kernel_size=2, stride=2)
@@ -725,10 +763,10 @@ class PhysNet2DCNN(nn.Module):
         # ConvBlock 3
         self.conv_block3 = nn.Sequential(
             nn.Conv1d(64, 64, kernel_size=3, padding=1),
-            nn.BatchNorm1d(64),
+            nn.BatchNorm1d(64, momentum=0.01, eps=1e-5),
             nn.ELU(),
             nn.Conv1d(64, 64, kernel_size=3, padding=1),
-            nn.BatchNorm1d(64),
+            nn.BatchNorm1d(64, momentum=0.01, eps=1e-5),
             nn.ELU()
         )
         self.avgpool3 = nn.AvgPool1d(kernel_size=2, stride=2)
@@ -736,10 +774,10 @@ class PhysNet2DCNN(nn.Module):
         # ConvBlock 4
         self.conv_block4 = nn.Sequential(
             nn.Conv1d(64, 64, kernel_size=3, padding=1),
-            nn.BatchNorm1d(64),
+            nn.BatchNorm1d(64, momentum=0.01, eps=1e-5),
             nn.ELU(),
             nn.Conv1d(64, 64, kernel_size=3, padding=1),
-            nn.BatchNorm1d(64),
+            nn.BatchNorm1d(64, momentum=0.01, eps=1e-5),
             nn.ELU()
         )
         self.avgpool4 = nn.AvgPool1d(kernel_size=2, stride=2)
@@ -747,10 +785,10 @@ class PhysNet2DCNN(nn.Module):
         # ConvBlock 5
         self.conv_block5 = nn.Sequential(
             nn.Conv1d(64, 64, kernel_size=3, padding=1),
-            nn.BatchNorm1d(64),
+            nn.BatchNorm1d(64, momentum=0.01, eps=1e-5),
             nn.ELU(),
             nn.Conv1d(64, 64, kernel_size=3, padding=1),
-            nn.BatchNorm1d(64),
+            nn.BatchNorm1d(64, momentum=0.01, eps=1e-5),
             nn.ELU()
         )
         
@@ -762,6 +800,20 @@ class PhysNet2DCNN(nn.Module):
         
         # Dropout
         self.dropout = nn.Dropout(0.2)
+        
+        # 重み初期化
+        self._initialize_weights()
+    
+    def _initialize_weights(self):
+        """He初期化で重みを初期化"""
+        for m in self.modules():
+            if isinstance(m, nn.Conv1d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.BatchNorm1d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
         
     def forward(self, x):
         batch_size = x.size(0)
@@ -800,7 +852,7 @@ class PhysNet2DCNN(nn.Module):
         return x
 
 # ================================
-# 深層PhysNet2DCNNモデル
+# 深層PhysNet2DCNNモデル（重み初期化追加）
 # ================================
 class DeepPhysNet2DCNN(nn.Module):
     """深層PhysNet2DCNN（8ブロック構成）"""
@@ -830,20 +882,20 @@ class DeepPhysNet2DCNN(nn.Module):
                 # 最初のブロック
                 conv_block = nn.Sequential(
                     nn.Conv1d(prev_channels, out_channels, kernel_size=7, padding=3),
-                    nn.BatchNorm1d(out_channels),
+                    nn.BatchNorm1d(out_channels, momentum=0.01, eps=1e-5),
                     nn.ELU(),
                     nn.Conv1d(out_channels, out_channels, kernel_size=5, padding=2),
-                    nn.BatchNorm1d(out_channels),
+                    nn.BatchNorm1d(out_channels, momentum=0.01, eps=1e-5),
                     nn.ELU()
                 )
             elif i < 4:
                 # 前半のブロック（2層構成）
                 conv_block = nn.Sequential(
                     nn.Conv1d(prev_channels, out_channels, kernel_size=3, padding=1),
-                    nn.BatchNorm1d(out_channels),
+                    nn.BatchNorm1d(out_channels, momentum=0.01, eps=1e-5),
                     nn.ELU(),
                     nn.Conv1d(out_channels, out_channels, kernel_size=3, padding=1),
-                    nn.BatchNorm1d(out_channels),
+                    nn.BatchNorm1d(out_channels, momentum=0.01, eps=1e-5),
                     nn.ELU()
                 )
             else:
@@ -851,13 +903,13 @@ class DeepPhysNet2DCNN(nn.Module):
                 mid_channels = out_channels
                 conv_block = nn.Sequential(
                     nn.Conv1d(prev_channels, mid_channels, kernel_size=1),
-                    nn.BatchNorm1d(mid_channels),
+                    nn.BatchNorm1d(mid_channels, momentum=0.01, eps=1e-5),
                     nn.ELU(),
                     nn.Conv1d(mid_channels, mid_channels, kernel_size=3, padding=1),
-                    nn.BatchNorm1d(mid_channels),
+                    nn.BatchNorm1d(mid_channels, momentum=0.01, eps=1e-5),
                     nn.ELU(),
                     nn.Conv1d(mid_channels, out_channels, kernel_size=1),
-                    nn.BatchNorm1d(out_channels),
+                    nn.BatchNorm1d(out_channels, momentum=0.01, eps=1e-5),
                     nn.ELU()
                 )
             
@@ -905,6 +957,23 @@ class DeepPhysNet2DCNN(nn.Module):
         
         self.block_dropout = nn.Dropout(0.1)
         
+        # 重み初期化
+        self._initialize_weights()
+    
+    def _initialize_weights(self):
+        """He初期化で重みを初期化"""
+        for m in self.modules():
+            if isinstance(m, nn.Conv1d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.BatchNorm1d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                nn.init.constant_(m.bias, 0)
+        
     def forward(self, x):
         batch_size = x.size(0)
         in_channels = x.size(1)
@@ -949,7 +1018,7 @@ class DeepPhysNet2DCNN(nn.Module):
         return x
 
 # ================================
-# CalibrationPhys準拠 PhysNet2DCNN (3D版) - 可変サイズ対応
+# CalibrationPhys準拠 PhysNet2DCNN (3D版)（重み初期化追加）
 # ================================
 class PhysNet2DCNN_3D(nn.Module):
     """
@@ -976,11 +1045,11 @@ class PhysNet2DCNN_3D(nn.Module):
         
         # ConvBlock 1: 32 filters
         self.conv1_1 = nn.Conv3d(in_channels, 32, kernel_size=(1, 5, 5), padding=(0, 2, 2))
-        self.bn1_1 = nn.BatchNorm3d(32)
+        self.bn1_1 = nn.BatchNorm3d(32, momentum=0.01, eps=1e-5)
         self.elu1_1 = nn.ELU(inplace=True)
         
         self.conv1_2 = nn.Conv3d(32, 32, kernel_size=(1, 5, 5), padding=(0, 2, 2))
-        self.bn1_2 = nn.BatchNorm3d(32)
+        self.bn1_2 = nn.BatchNorm3d(32, momentum=0.01, eps=1e-5)
         self.elu1_2 = nn.ELU(inplace=True)
         
         # 小さい入力に対応したプーリング
@@ -991,11 +1060,11 @@ class PhysNet2DCNN_3D(nn.Module):
         
         # ConvBlock 2: 64 filters
         self.conv2_1 = nn.Conv3d(32, 64, kernel_size=(3, 3, 3), padding=(1, 1, 1))
-        self.bn2_1 = nn.BatchNorm3d(64)
+        self.bn2_1 = nn.BatchNorm3d(64, momentum=0.01, eps=1e-5)
         self.elu2_1 = nn.ELU(inplace=True)
         
         self.conv2_2 = nn.Conv3d(64, 64, kernel_size=(3, 3, 3), padding=(1, 1, 1))
-        self.bn2_2 = nn.BatchNorm3d(64)
+        self.bn2_2 = nn.BatchNorm3d(64, momentum=0.01, eps=1e-5)
         self.elu2_2 = nn.ELU(inplace=True)
         
         # 条件付きプーリング
@@ -1006,33 +1075,33 @@ class PhysNet2DCNN_3D(nn.Module):
         
         # ConvBlock 3: 64 filters
         self.conv3_1 = nn.Conv3d(64, 64, kernel_size=(3, 3, 3), padding=(1, 1, 1))
-        self.bn3_1 = nn.BatchNorm3d(64)
+        self.bn3_1 = nn.BatchNorm3d(64, momentum=0.01, eps=1e-5)
         self.elu3_1 = nn.ELU(inplace=True)
         
         self.conv3_2 = nn.Conv3d(64, 64, kernel_size=(3, 3, 3), padding=(1, 1, 1))
-        self.bn3_2 = nn.BatchNorm3d(64)
+        self.bn3_2 = nn.BatchNorm3d(64, momentum=0.01, eps=1e-5)
         self.elu3_2 = nn.ELU(inplace=True)
         
         self.pool3 = nn.AvgPool3d(kernel_size=(2, 1, 1), stride=(2, 1, 1))
         
         # ConvBlock 4: 64 filters
         self.conv4_1 = nn.Conv3d(64, 64, kernel_size=(3, 3, 3), padding=(1, 1, 1))
-        self.bn4_1 = nn.BatchNorm3d(64)
+        self.bn4_1 = nn.BatchNorm3d(64, momentum=0.01, eps=1e-5)
         self.elu4_1 = nn.ELU(inplace=True)
         
         self.conv4_2 = nn.Conv3d(64, 64, kernel_size=(3, 3, 3), padding=(1, 1, 1))
-        self.bn4_2 = nn.BatchNorm3d(64)
+        self.bn4_2 = nn.BatchNorm3d(64, momentum=0.01, eps=1e-5)
         self.elu4_2 = nn.ELU(inplace=True)
         
         self.pool4 = nn.AvgPool3d(kernel_size=(2, 1, 1), stride=(2, 1, 1))
         
         # ConvBlock 5: 64 filters with upsampling
         self.conv5_1 = nn.Conv3d(64, 64, kernel_size=(3, 3, 3), padding=(1, 1, 1))
-        self.bn5_1 = nn.BatchNorm3d(64)
+        self.bn5_1 = nn.BatchNorm3d(64, momentum=0.01, eps=1e-5)
         self.elu5_1 = nn.ELU(inplace=True)
         
         self.conv5_2 = nn.Conv3d(64, 64, kernel_size=(3, 3, 3), padding=(1, 1, 1))
-        self.bn5_2 = nn.BatchNorm3d(64)
+        self.bn5_2 = nn.BatchNorm3d(64, momentum=0.01, eps=1e-5)
         self.elu5_2 = nn.ELU(inplace=True)
         
         # Upsample
@@ -1040,11 +1109,11 @@ class PhysNet2DCNN_3D(nn.Module):
         
         # ConvBlock 6: 64 filters
         self.conv6_1 = nn.Conv3d(64, 64, kernel_size=(1, 3, 3), padding=(0, 1, 1))
-        self.bn6_1 = nn.BatchNorm3d(64)
+        self.bn6_1 = nn.BatchNorm3d(64, momentum=0.01, eps=1e-5)
         self.elu6_1 = nn.ELU(inplace=True)
         
         self.conv6_2 = nn.Conv3d(64, 64, kernel_size=(1, 3, 3), padding=(0, 1, 1))
-        self.bn6_2 = nn.BatchNorm3d(64)
+        self.bn6_2 = nn.BatchNorm3d(64, momentum=0.01, eps=1e-5)
         self.elu6_2 = nn.ELU(inplace=True)
         
         # Adaptive Spatial Global Average Pooling（どんなサイズでも1x1に）
@@ -1055,6 +1124,20 @@ class PhysNet2DCNN_3D(nn.Module):
         
         # Dropout
         self.dropout = nn.Dropout(0.2)
+        
+        # 重み初期化
+        self._initialize_weights()
+    
+    def _initialize_weights(self):
+        """He初期化で重みを初期化"""
+        for m in self.modules():
+            if isinstance(m, nn.Conv3d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.BatchNorm3d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
         
     def forward(self, x):
         """
@@ -1141,7 +1224,7 @@ class PhysNet2DCNN_3D(nn.Module):
         return x
 
 # ================================
-# CalibrationPhys準拠 PhysNet2DCNN (2D版) - 可変サイズ対応
+# CalibrationPhys準拠 PhysNet2DCNN (2D版)（重み初期化追加）
 # ================================
 class PhysNet2DCNN_2D(nn.Module):
     """
@@ -1174,9 +1257,9 @@ class PhysNet2DCNN_2D(nn.Module):
             self.conv1_1 = nn.Conv2d(in_channels, 32, kernel_size=5, padding=2)
             self.conv1_2 = nn.Conv2d(32, 32, kernel_size=5, padding=2)
         
-        self.bn1_1 = nn.BatchNorm2d(32)
+        self.bn1_1 = nn.BatchNorm2d(32, momentum=0.01, eps=1e-5)
         self.elu1_1 = nn.ELU(inplace=True)
-        self.bn1_2 = nn.BatchNorm2d(32)
+        self.bn1_2 = nn.BatchNorm2d(32, momentum=0.01, eps=1e-5)
         self.elu1_2 = nn.ELU(inplace=True)
         
         # 条件付きプーリング
@@ -1187,11 +1270,11 @@ class PhysNet2DCNN_2D(nn.Module):
         
         # ConvBlock 2: 64 filters
         self.conv2_1 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
-        self.bn2_1 = nn.BatchNorm2d(64)
+        self.bn2_1 = nn.BatchNorm2d(64, momentum=0.01, eps=1e-5)
         self.elu2_1 = nn.ELU(inplace=True)
         
         self.conv2_2 = nn.Conv2d(64, 64, kernel_size=3, padding=1)
-        self.bn2_2 = nn.BatchNorm2d(64)
+        self.bn2_2 = nn.BatchNorm2d(64, momentum=0.01, eps=1e-5)
         self.elu2_2 = nn.ELU(inplace=True)
         
         # 条件付きプーリング
@@ -1202,11 +1285,11 @@ class PhysNet2DCNN_2D(nn.Module):
         
         # ConvBlock 3: 64 filters
         self.conv3_1 = nn.Conv2d(64, 64, kernel_size=3, padding=1)
-        self.bn3_1 = nn.BatchNorm2d(64)
+        self.bn3_1 = nn.BatchNorm2d(64, momentum=0.01, eps=1e-5)
         self.elu3_1 = nn.ELU(inplace=True)
         
         self.conv3_2 = nn.Conv2d(64, 64, kernel_size=3, padding=1)
-        self.bn3_2 = nn.BatchNorm2d(64)
+        self.bn3_2 = nn.BatchNorm2d(64, momentum=0.01, eps=1e-5)
         self.elu3_2 = nn.ELU(inplace=True)
         
         # 条件付きプーリング
@@ -1218,22 +1301,22 @@ class PhysNet2DCNN_2D(nn.Module):
         # ConvBlock 4: 64 filters（小さい入力では省略可能）
         if not self.small_input:
             self.conv4_1 = nn.Conv2d(64, 64, kernel_size=3, padding=1)
-            self.bn4_1 = nn.BatchNorm2d(64)
+            self.bn4_1 = nn.BatchNorm2d(64, momentum=0.01, eps=1e-5)
             self.elu4_1 = nn.ELU(inplace=True)
             
             self.conv4_2 = nn.Conv2d(64, 64, kernel_size=3, padding=1)
-            self.bn4_2 = nn.BatchNorm2d(64)
+            self.bn4_2 = nn.BatchNorm2d(64, momentum=0.01, eps=1e-5)
             self.elu4_2 = nn.ELU(inplace=True)
             
             self.pool4 = nn.AvgPool2d(kernel_size=2, stride=2)
         
         # ConvBlock 5: 64 filters
         self.conv5_1 = nn.Conv2d(64, 64, kernel_size=3, padding=1)
-        self.bn5_1 = nn.BatchNorm2d(64)
+        self.bn5_1 = nn.BatchNorm2d(64, momentum=0.01, eps=1e-5)
         self.elu5_1 = nn.ELU(inplace=True)
         
         self.conv5_2 = nn.Conv2d(64, 64, kernel_size=3, padding=1)
-        self.bn5_2 = nn.BatchNorm2d(64)
+        self.bn5_2 = nn.BatchNorm2d(64, momentum=0.01, eps=1e-5)
         self.elu5_2 = nn.ELU(inplace=True)
         
         # Adaptive Spatial Global Average Pooling（どんなサイズでも1x1に）
@@ -1241,11 +1324,11 @@ class PhysNet2DCNN_2D(nn.Module):
         
         # Temporal processing
         self.temporal_conv1 = nn.Conv1d(64, 64, kernel_size=3, padding=1)
-        self.temporal_bn1 = nn.BatchNorm1d(64)
+        self.temporal_bn1 = nn.BatchNorm1d(64, momentum=0.01, eps=1e-5)
         self.temporal_elu1 = nn.ELU(inplace=True)
         
         self.temporal_conv2 = nn.Conv1d(64, 32, kernel_size=3, padding=1)
-        self.temporal_bn2 = nn.BatchNorm1d(32)
+        self.temporal_bn2 = nn.BatchNorm1d(32, momentum=0.01, eps=1e-5)
         self.temporal_elu2 = nn.ELU(inplace=True)
         
         # Final layer
@@ -1253,6 +1336,23 @@ class PhysNet2DCNN_2D(nn.Module):
         
         # Dropout
         self.dropout = nn.Dropout(0.2)
+        
+        # 重み初期化
+        self._initialize_weights()
+    
+    def _initialize_weights(self):
+        """He初期化で重みを初期化"""
+        for m in self.modules():
+            if isinstance(m, (nn.Conv2d, nn.Conv1d)):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, (nn.BatchNorm2d, nn.BatchNorm1d)):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                nn.init.constant_(m.bias, 0)
         
     def forward(self, x):
         """
@@ -1376,6 +1476,8 @@ def create_model(config):
             print(f"  - 回転: {'有効' if config.rotation_enabled else '無効'}")
             print(f"  - 時間軸ストレッチング: {'有効' if config.time_stretch_enabled else '無効'}")
             print(f"  - 明度・コントラスト調整: {'有効' if config.brightness_contrast_enabled else '無効'}")
+        print(f"Warmup: {config.warmup_epochs}エポック (初期学習率×{config.warmup_lr_factor})")
+        print(f"勾配クリッピング: {config.gradient_clip_val}")
         print(f"パラメータ数: {sum(p.numel() for p in model.parameters()):,}")
         
         if config.model_type == "3d":
@@ -1467,10 +1569,10 @@ def load_data_single_subject(subject, config):
     return rgb_data, signal_data
 
 # ================================
-# 学習関数
+# 学習関数（Warmup追加）
 # ================================
 def train_model(model, train_loader, val_loader, config, fold=None, subject=None):
-    """モデルの学習"""
+    """モデルの学習（Warmup対応）"""
     fold_str = f"Fold {fold+1}" if fold is not None else ""
     subject_str = f"{subject}" if subject is not None else ""
     
@@ -1479,6 +1581,9 @@ def train_model(model, train_loader, val_loader, config, fold=None, subject=None
         print(f"    モデル: {config.model_type}")
         print(f"    エポック数: {config.epochs}")
         print(f"    バッチサイズ: {config.batch_size}")
+        print(f"    Warmupエポック数: {config.warmup_epochs}")
+        print(f"    初期学習率: {config.learning_rate}")
+        print(f"    Warmup開始学習率: {config.learning_rate * config.warmup_lr_factor}")
     
     model = model.to(config.device)
     
@@ -1498,6 +1603,13 @@ def train_model(model, train_loader, val_loader, config, fold=None, subject=None
     
     optimizer = optim.Adam(model.parameters(), lr=config.learning_rate, 
                           weight_decay=config.weight_decay)
+    
+    # Warmup用の初期学習率設定
+    initial_lr = config.learning_rate
+    if config.warmup_epochs > 0:
+        warmup_lr = initial_lr * config.warmup_lr_factor
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = warmup_lr
     
     # スケジューラーの選択
     if config.scheduler_type == "cosine":
@@ -1537,6 +1649,15 @@ def train_model(model, train_loader, val_loader, config, fold=None, subject=None
     train_targets_best = None
     
     for epoch in range(config.epochs):
+        # Warmup処理
+        if epoch < config.warmup_epochs and config.warmup_epochs > 0:
+            current_warmup_lr = warmup_lr + (initial_lr - warmup_lr) * (epoch / config.warmup_epochs)
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = current_warmup_lr
+        elif epoch == config.warmup_epochs and config.warmup_epochs > 0:
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = initial_lr
+        
         # 学習フェーズ
         model.train()
         train_loss = 0
@@ -1557,10 +1678,11 @@ def train_model(model, train_loader, val_loader, config, fold=None, subject=None
             
             loss.backward()
             
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            # 勾配クリッピング（設定値使用）
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=config.gradient_clip_val)
             optimizer.step()
             
-            if scheduler_per_batch:
+            if scheduler_per_batch and epoch >= config.warmup_epochs:
                 scheduler.step()
             
             train_loss += loss.item()
@@ -1614,15 +1736,16 @@ def train_model(model, train_loader, val_loader, config, fold=None, subject=None
         train_correlations.append(train_corr)
         val_correlations.append(val_corr)
         
-        # スケジューラー更新
-        if not scheduler_per_batch:
+        # スケジューラー更新（Warmup終了後）
+        if not scheduler_per_batch and epoch >= config.warmup_epochs:
             if config.scheduler_type == "plateau":
                 scheduler.step(val_loss)
             else:
                 scheduler.step()
         
-        # モデル保存
-        if val_loss < best_val_loss or (val_loss < best_val_loss * 1.1 and val_corr > best_val_corr):
+        # モデル保存（改善判定を厳密化）
+        improvement = (best_val_loss - val_loss) / best_val_loss if best_val_loss > 0 else 1
+        if improvement > config.min_delta or val_corr > best_val_corr * config.patience_improvement_threshold:
             best_val_loss = val_loss
             best_val_corr = val_corr
             patience_counter = 0
@@ -1653,9 +1776,12 @@ def train_model(model, train_loader, val_loader, config, fold=None, subject=None
             patience_counter += 1
         
         # ログ出力
-        if config.verbose and ((epoch + 1) % 20 == 0 or epoch == 0):
+        if config.verbose and ((epoch + 1) % 20 == 0 or epoch == 0 or epoch < config.warmup_epochs):
             current_lr = optimizer.param_groups[0]['lr']
-            print(f"    Epoch [{epoch+1:3d}/{config.epochs}] LR: {current_lr:.2e}")
+            if epoch < config.warmup_epochs:
+                print(f"    [Warmup] Epoch [{epoch+1:3d}/{config.epochs}] LR: {current_lr:.2e}")
+            else:
+                print(f"    Epoch [{epoch+1:3d}/{config.epochs}] LR: {current_lr:.2e}")
             print(f"      Train Loss: {train_loss:.4f}, Corr: {train_corr:.4f}")
             print(f"      Val Loss: {val_loss:.4f}, MAE: {val_mae:.4f}, Corr: {val_corr:.4f}")
         
@@ -1736,6 +1862,10 @@ def task_cross_validation(rgb_data, signal_data, config, subject, subject_save_d
     
     # 乱数シードを設定（再現性のため）
     np.random.seed(config.random_seed)
+    torch.manual_seed(config.random_seed)
+    
+    # DataLoader用のワーカー初期化関数を取得
+    seed_worker = set_all_seeds(config.random_seed)
     
     for fold, test_task in enumerate(config.tasks):
         if config.verbose:
@@ -1809,7 +1939,7 @@ def task_cross_validation(rgb_data, signal_data, config, subject, subject_save_d
             print(f"      テスト: 平均={test_signal.mean():.3f}, 標準偏差={test_signal.std():.3f}, "
                   f"範囲=[{test_signal.min():.3f}, {test_signal.max():.3f}]")
         
-        # データローダー作成（データ拡張対応）
+        # データローダー作成（データ拡張対応、決定的動作のため設定）
         train_dataset = CODataset(train_rgb, train_signal, config.model_type, 
                                  config.use_channel, config, is_training=True)
         val_dataset = CODataset(val_rgb, val_signal, config.model_type, 
@@ -1817,9 +1947,12 @@ def task_cross_validation(rgb_data, signal_data, config, subject, subject_save_d
         test_dataset = CODataset(test_rgb, test_signal, config.model_type, 
                                 config.use_channel, config, is_training=False)
         
-        train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True)
-        val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False)
-        test_loader = DataLoader(test_dataset, batch_size=config.batch_size, shuffle=False)
+        train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True,
+                                 num_workers=0, worker_init_fn=seed_worker, pin_memory=False)
+        val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False,
+                               num_workers=0, worker_init_fn=seed_worker, pin_memory=False)
+        test_loader = DataLoader(test_dataset, batch_size=config.batch_size, shuffle=False,
+                                num_workers=0, worker_init_fn=seed_worker, pin_memory=False)
         
         # モデル作成
         model = create_model(config)
@@ -2121,6 +2254,9 @@ def plot_all_subjects_summary_unified(all_subjects_results, config):
 def main():
     config = Config()
     
+    # 完全な再現性のための乱数シード設定
+    set_all_seeds(config.random_seed)
+    
     print("\n" + "="*60)
     print(" PhysNet2DCNN - 個人内解析（6分割交差検証）")
     print("="*60)
@@ -2142,17 +2278,20 @@ def main():
         print(f"  拡張手法:")
         if config.crop_enabled:
             print(f"    - ランダムクロップ ({config.crop_size_ratio*100:.0f}%)")
-        if config.rotation_enabled:
+if config.rotation_enabled:
             print(f"    - 回転 (±{config.rotation_range}度)")
         if config.time_stretch_enabled:
             print(f"    - 時間軸ストレッチング ({config.time_stretch_range[0]:.1f}x-{config.time_stretch_range[1]:.1f}x)")
         if config.brightness_contrast_enabled:
             print(f"    - 明度・コントラスト調整 (±{config.brightness_range*100:.0f}%)")
+    print(f"Warmup: {config.warmup_epochs}エポック (初期学習率×{config.warmup_lr_factor})")
     print(f"損失関数: {config.loss_type}")
     print(f"スケジューラー: {config.scheduler_type}")
+    print(f"勾配クリッピング: {config.gradient_clip_val}")
     print(f"デバイス: {config.device}")
     print(f"保存先: {config.save_path}")
     print(f"被験者数: {len(config.subjects)}")
+    print(f"乱数シード: {config.random_seed} (完全再現性モード)")
     
     all_subjects_results = []
     
@@ -2205,6 +2344,23 @@ def main():
             print(f"    全体訓練: MAE={train_mae:.4f}, Corr={train_corr:.4f}")
             print(f"    全体テスト: MAE={test_mae:.4f}, Corr={test_corr:.4f}")
             
+            # 結果をCSVファイルに保存
+            results_df = pd.DataFrame({
+                'Subject': [subject],
+                'Train_MAE': [train_mae],
+                'Train_Corr': [train_corr],
+                'Test_MAE': [test_mae],
+                'Test_Corr': [test_corr]
+            })
+            
+            csv_path = subject_save_dir / 'results_summary.csv'
+            results_df.to_csv(csv_path, index=False)
+            
+            # 各Foldの結果も保存
+            fold_df = pd.DataFrame(fold_results)
+            fold_csv_path = subject_save_dir / 'fold_results.csv'
+            fold_df.to_csv(fold_csv_path, index=False)
+            
         except Exception as e:
             print(f"  {subject}でエラー発生: {e}")
             import traceback
@@ -2223,9 +2379,75 @@ def main():
         avg_test_mae = np.mean([r['test_mae'] for r in all_subjects_results])
         avg_test_corr = np.mean([r['test_corr'] for r in all_subjects_results])
         
+        std_train_mae = np.std([r['train_mae'] for r in all_subjects_results])
+        std_train_corr = np.std([r['train_corr'] for r in all_subjects_results])
+        std_test_mae = np.std([r['test_mae'] for r in all_subjects_results])
+        std_test_corr = np.std([r['test_corr'] for r in all_subjects_results])
+        
         print(f"\n全被験者平均結果:")
-        print(f"  訓練: MAE={avg_train_mae:.4f}, Corr={avg_train_corr:.4f}")
-        print(f"  テスト: MAE={avg_test_mae:.4f}, Corr={avg_test_corr:.4f}")
+        print(f"  訓練: MAE={avg_train_mae:.4f}±{std_train_mae:.4f}, Corr={avg_train_corr:.4f}±{std_train_corr:.4f}")
+        print(f"  テスト: MAE={avg_test_mae:.4f}±{std_test_mae:.4f}, Corr={avg_test_corr:.4f}±{std_test_corr:.4f}")
+        
+        # 全体結果をCSVファイルに保存
+        import pandas as pd
+        all_results_df = pd.DataFrame([{
+            'Subject': r['subject'],
+            'Train_MAE': r['train_mae'],
+            'Train_Corr': r['train_corr'],
+            'Test_MAE': r['test_mae'],
+            'Test_Corr': r['test_corr']
+        } for r in all_subjects_results])
+        
+        # 平均と標準偏差を追加
+        mean_row = pd.DataFrame({
+            'Subject': ['Mean'],
+            'Train_MAE': [avg_train_mae],
+            'Train_Corr': [avg_train_corr],
+            'Test_MAE': [avg_test_mae],
+            'Test_Corr': [avg_test_corr]
+        })
+        
+        std_row = pd.DataFrame({
+            'Subject': ['Std'],
+            'Train_MAE': [std_train_mae],
+            'Train_Corr': [std_train_corr],
+            'Test_MAE': [std_test_mae],
+            'Test_Corr': [std_test_corr]
+        })
+        
+        all_results_df = pd.concat([all_results_df, mean_row, std_row], ignore_index=True)
+        
+        save_dir = Path(config.save_path)
+        all_results_df.to_csv(save_dir / 'all_subjects_results.csv', index=False)
+        
+        # 設定情報も保存
+        with open(save_dir / 'config_summary.txt', 'w', encoding='utf-8') as f:
+            f.write("="*60 + "\n")
+            f.write("実験設定\n")
+            f.write("="*60 + "\n")
+            f.write(f"実行日時: {config.timestamp}\n")
+            f.write(f"モデルタイプ: {config.model_type}\n")
+            f.write(f"信号タイプ: {config.signal_type}\n")
+            f.write(f"使用チャンネル: {config.use_channel}\n")
+            f.write(f"LABデータ使用: {config.use_lab}\n")
+            f.write(f"訓練:検証比率: {config.train_val_split_ratio}:{1-config.train_val_split_ratio}\n")
+            f.write(f"検証分割戦略: {config.validation_split_strategy}\n")
+            f.write(f"データ拡張: {config.use_augmentation}\n")
+            f.write(f"Warmupエポック: {config.warmup_epochs}\n")
+            f.write(f"学習率: {config.learning_rate}\n")
+            f.write(f"バッチサイズ: {config.batch_size}\n")
+            f.write(f"エポック数: {config.epochs}\n")
+            f.write(f"損失関数: {config.loss_type}\n")
+            f.write(f"勾配クリッピング: {config.gradient_clip_val}\n")
+            f.write(f"乱数シード: {config.random_seed}\n")
+            f.write("\n" + "="*60 + "\n")
+            f.write("実験結果\n")
+            f.write("="*60 + "\n")
+            f.write(f"処理被験者数: {len(all_subjects_results)}/{len(config.subjects)}\n")
+            f.write(f"平均訓練MAE: {avg_train_mae:.4f}±{std_train_mae:.4f}\n")
+            f.write(f"平均訓練相関: {avg_train_corr:.4f}±{std_train_corr:.4f}\n")
+            f.write(f"平均テストMAE: {avg_test_mae:.4f}±{std_test_mae:.4f}\n")
+            f.write(f"平均テスト相関: {avg_test_corr:.4f}±{std_test_corr:.4f}\n")
     
     print(f"\n{'='*60}")
     print("処理完了")
@@ -2233,4 +2455,8 @@ def main():
     print(f"{'='*60}")
 
 if __name__ == "__main__":
+    # pandasのインポート（CSV保存用）
+    import pandas as pd
+    
+    # メイン実行
     main()
