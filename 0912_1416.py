@@ -252,7 +252,7 @@ class DataAugmentation:
     
     def time_stretch(self, rgb_data, signal_data=None):
         """
-        時間軸ストレッチング
+        時間軸ストレッチング（高速版）
         rgb_data: (T, H, W, C)
         signal_data: (T,) or None
         """
@@ -263,30 +263,9 @@ class DataAugmentation:
             return rgb_data, signal_data
         
         stretch_factor = np.random.uniform(*self.config.time_stretch_range)
-        t_original = rgb_data.shape[0]
-        t_stretched = int(t_original * stretch_factor)
         
-        # RGBデータのストレッチング
-        rgb_stretched = np.zeros((t_stretched, *rgb_data.shape[1:]))
-        
-        for h in range(rgb_data.shape[1]):
-            for w in range(rgb_data.shape[2]):
-                for c in range(rgb_data.shape[3]):
-                    # 補間用の関数を作成
-                    f = interp1d(np.arange(t_original), rgb_data[:, h, w, c], 
-                               kind='linear', fill_value='extrapolate')
-                    # 新しい時間軸で補間
-                    new_t = np.linspace(0, t_original-1, t_stretched)
-                    rgb_stretched[:, h, w, c] = f(new_t)
-        
-        # 元の長さにリサンプリング
-        rgb_resampled = np.zeros_like(rgb_data)
-        for h in range(rgb_data.shape[1]):
-            for w in range(rgb_data.shape[2]):
-                for c in range(rgb_data.shape[3]):
-                    f = interp1d(np.arange(t_stretched), rgb_stretched[:, h, w, c], 
-                               kind='linear', fill_value='extrapolate')
-                    rgb_resampled[:, h, w, c] = f(np.linspace(0, t_stretched-1, t_original))
+        # 高速版のtime_stretch_fastを使用
+        rgb_resampled = self.time_stretch_fast(rgb_data, stretch_factor)
         
         # 信号データのストレッチング（提供されている場合）
         if signal_data is not None and signal_data.ndim == 1:
@@ -307,6 +286,20 @@ class DataAugmentation:
             return rgb_resampled, signal_resampled
         
         return rgb_resampled, signal_data
+    
+    def time_stretch_fast(self, rgb_np, factor):
+        """
+        PyTorchを使用した高速時間軸ストレッチング
+        rgb_np: (T,H,W,C) in [0,1]
+        """
+        x = torch.from_numpy(rgb_np).permute(3,0,1,2).unsqueeze(0).float()  # (1,C,T,H,W)
+        T = x.shape[2]
+        T2 = max(1, int(T*factor))
+        with torch.no_grad():
+            x = F.interpolate(x, size=(T2, x.shape[3], x.shape[4]), mode='trilinear', align_corners=False)
+            x = F.interpolate(x, size=(T,  x.shape[3], x.shape[4]), mode='trilinear', align_corners=False)
+        out = x.squeeze(0).permute(1,2,3,0).cpu().numpy()  # (T,H,W,C)
+        return out
     
     def brightness_contrast_adjust(self, data):
         """
