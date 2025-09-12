@@ -1307,9 +1307,16 @@ def load_data_single_subject(subject, config):
     
     # 3D/2Dモデル用にデータ形状を調整
     if config.model_type in ['3d', '2d']:
-        # (360, 14, 16, C) -> そのまま使用（時間次元として扱う）
-        # CalibrationPhys準拠モデルでは最初の次元を時間として扱う
-        pass  # データ形状の調整は不要
+        # データ形状の確認と調整
+        if rgb_data.ndim == 5:  # (N, T, H, W, C)
+            pass
+        elif rgb_data.ndim == 4:  # (N, H, W, C) の場合、時間次元を追加
+            rgb_data = np.expand_dims(rgb_data, axis=1)
+            rgb_data = np.repeat(rgb_data, config.time_frames, axis=1)
+    else:
+        # 従来モデル用
+        # データはすでに読み込み済みなので、追加の処理は不要
+        pass
     
     # 信号データの読み込み
     signal_data_list = []
