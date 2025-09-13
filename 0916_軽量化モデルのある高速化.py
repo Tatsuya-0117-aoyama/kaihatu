@@ -135,7 +135,7 @@ class Config:
         # ================================
         # データ拡張設定
         # ================================
-        self.use_augmentation = True  # データ拡張を使用するか
+        self.use_augmentation = False  # データ拡張を使用するか
         
         # データ拡張のパラメータ
         if self.use_augmentation:
