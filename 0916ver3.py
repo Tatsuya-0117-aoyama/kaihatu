@@ -76,7 +76,7 @@ class Config:
         self.num_workers = 0  # DataLoaderのワーカー数（CPUコア数に応じて調整）
         self.pin_memory = True  # GPU転送の高速化
         self.persistent_workers = True  # ワーカーの再利用（メモリ使用量増加）
-        self.prefetch_factor = 2  # 先読みバッチ数
+        self.prefetch_factor = None  # 先読みバッチ数
         
         # ================================
         # LAB変換データ使用設定
@@ -2109,7 +2109,7 @@ def task_cross_validation(rgb_data, signal_data, config, subject, subject_save_d
             worker_init_fn=seed_worker, 
             pin_memory=config.pin_memory,
             persistent_workers=config.persistent_workers if config.num_workers > 0 else False,
-            prefetch_factor=config.prefetch_factor if config.num_workers > 0 else 2
+            prefetch_factor=config.prefetch_factor if config.num_workers > 0 else None
         )
         
         val_loader = DataLoader(
@@ -2120,7 +2120,7 @@ def task_cross_validation(rgb_data, signal_data, config, subject, subject_save_d
             worker_init_fn=seed_worker,
             pin_memory=config.pin_memory,
             persistent_workers=config.persistent_workers if config.num_workers > 0 else False,
-            prefetch_factor=config.prefetch_factor if config.num_workers > 0 else 2
+            prefetch_factor=config.prefetch_factor if config.num_workers > 0 else None
         )
         
         test_loader = DataLoader(
@@ -2131,7 +2131,7 @@ def task_cross_validation(rgb_data, signal_data, config, subject, subject_save_d
             worker_init_fn=seed_worker,
             pin_memory=config.pin_memory,
             persistent_workers=config.persistent_workers if config.num_workers > 0 else False,
-            prefetch_factor=config.prefetch_factor if config.num_workers > 0 else 2
+            prefetch_factor=config.prefetch_factor if config.num_workers > 0 else None
         )
         
         # モデル作成
