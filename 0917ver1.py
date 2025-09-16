@@ -21,6 +21,7 @@ import pandas as pd
 from collections import defaultdict
 import json
 import time
+from torch.amp import GradScaler, autocast
 warnings.filterwarnings('ignore')
 
 # フォント設定（メイリオ）
@@ -93,7 +94,7 @@ class Config:
         # ================================
         # LAB変換データ使用設定
         # ================================
-        self.use_lab = True
+        self.use_lab = Falsew
         self.lab_filename = "_downsampled_1Hzver2.npy"
         
         # ================================
