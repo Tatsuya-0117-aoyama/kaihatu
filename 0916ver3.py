@@ -72,8 +72,8 @@ class Config:
         # 高速化設定（新規追加）
         # ================================
         self.use_amp = True  # Automatic Mixed Precision使用
-        self.use_compile = True  # torch.compile使用（PyTorch 2.0+）
-        self.num_workers = 4  # DataLoaderのワーカー数（CPUコア数に応じて調整）
+        self.use_compile = False  # torch.compile使用（PyTorch 2.0+）
+        self.num_workers = 0  # DataLoaderのワーカー数（CPUコア数に応じて調整）
         self.pin_memory = True  # GPU転送の高速化
         self.persistent_workers = True  # ワーカーの再利用（メモリ使用量増加）
         self.prefetch_factor = 2  # 先読みバッチ数
