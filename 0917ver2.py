@@ -789,13 +789,19 @@ class MultiSignalDataset(Dataset):
 # ================================
 # PhysNet2DCNN (3D版) - 複数出力対応
 # ================================
-class PhysNet2DCNN_3D_Multi(nn.Module):
-    """3D畳み込みPhysNet（複数出力対応）"""
-    def __init__(self, input_shape=None, output_channels=1):
-        super(PhysNet2DCNN_3D_Multi, self).__init__()
+class PhysNet2DCNN_3D(nn.Module):
+    """
+    CalibrationPhys論文準拠のPhysNet2DCNN（3D畳み込み版）
+    様々な入力サイズに対応（14x16, 36x36など）
+    入力: (batch_size, time_frames, height, width, channels)
+    出力: (batch_size, time_frames) or (batch_size, time_frames, n_signals)
+    """
+    def __init__(self, input_shape=None, output_channels=1):  # output_channelsを追加（デフォルト1）
+        super(PhysNet2DCNN_3D, self).__init__()
         
-        self.output_channels = output_channels
+        self.output_channels = output_channels  # 追加
         
+        # 入力チャンネル数を動的に設定
         if input_shape is not None:
             in_channels = input_shape[-1]
             height = input_shape[1] if len(input_shape) >= 3 else 36
@@ -805,8 +811,10 @@ class PhysNet2DCNN_3D_Multi(nn.Module):
             height = 36
             width = 36
         
+        # 入力サイズに基づいてプーリングサイズを調整
         self.adaptive_pooling = height < 36 or width < 36
         
+        # [元のコードと完全に同じConvBlock構造]
         # ConvBlock 1: 32 filters
         self.conv1_1 = nn.Conv3d(in_channels, 32, kernel_size=(1, 5, 5), padding=(0, 2, 2))
         self.bn1_1 = nn.BatchNorm3d(32, momentum=0.01, eps=1e-5)
@@ -816,6 +824,7 @@ class PhysNet2DCNN_3D_Multi(nn.Module):
         self.bn1_2 = nn.BatchNorm3d(32, momentum=0.01, eps=1e-5)
         self.elu1_2 = nn.ELU(inplace=True)
         
+        # 小さい入力に対応したプーリング
         if height <= 16 or width <= 16:
             self.pool1 = nn.Identity()
         else:
@@ -830,6 +839,7 @@ class PhysNet2DCNN_3D_Multi(nn.Module):
         self.bn2_2 = nn.BatchNorm3d(64, momentum=0.01, eps=1e-5)
         self.elu2_2 = nn.ELU(inplace=True)
         
+        # 条件付きプーリング
         if height <= 16 or width <= 16:
             self.pool2 = nn.AvgPool3d(kernel_size=(2, 1, 1), stride=(2, 1, 1))
         else:
@@ -866,6 +876,7 @@ class PhysNet2DCNN_3D_Multi(nn.Module):
         self.bn5_2 = nn.BatchNorm3d(64, momentum=0.01, eps=1e-5)
         self.elu5_2 = nn.ELU(inplace=True)
         
+        # Upsample
         self.upsample = nn.Upsample(scale_factor=(2, 1, 1), mode='trilinear', align_corners=False)
         
         # ConvBlock 6: 64 filters
@@ -877,13 +888,16 @@ class PhysNet2DCNN_3D_Multi(nn.Module):
         self.bn6_2 = nn.BatchNorm3d(64, momentum=0.01, eps=1e-5)
         self.elu6_2 = nn.ELU(inplace=True)
         
+        # Adaptive Spatial Global Average Pooling
         self.spatial_pool = nn.AdaptiveAvgPool3d((None, 1, 1))
         
-        # Final Conv - 複数出力対応
-        self.conv_final = nn.Conv3d(64, self.output_channels, kernel_size=1)
+        # Final Conv - 唯一の変更点
+        self.conv_final = nn.Conv3d(64, self.output_channels, kernel_size=1)  # 1 → output_channels
         
+        # Dropout
         self.dropout = nn.Dropout(0.2)
         
+        # 重み初期化
         self._initialize_weights()
     
     def _initialize_weights(self):
@@ -896,53 +910,101 @@ class PhysNet2DCNN_3D_Multi(nn.Module):
             elif isinstance(m, nn.BatchNorm3d):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
-        
+    
     def forward(self, x):
+        """
+        入力: x shape (B, T, H, W, C)
+        出力: shape (B, T) or (B, T, output_channels)
+        """
         batch_size = x.size(0)
         time_frames = x.size(1)
         
-        x = x.permute(0, 4, 1, 2, 3)
+        # PyTorchのConv3dは (B, C, D, H, W)を期待
+        x = x.permute(0, 4, 1, 2, 3)  # (B, C, T, H, W)
         
-        # ConvBlocks
-        x = self.elu1_1(self.bn1_1(self.conv1_1(x)))
-        x = self.elu1_2(self.bn1_2(self.conv1_2(x)))
-        x = self.dropout(self.pool1(x))
+        # [元のコードと完全に同じforward処理]
+        # ConvBlock 1
+        x = self.conv1_1(x)
+        x = self.bn1_1(x)
+        x = self.elu1_1(x)
+        x = self.conv1_2(x)
+        x = self.bn1_2(x)
+        x = self.elu1_2(x)
+        x = self.pool1(x)
+        x = self.dropout(x)
         
-        x = self.elu2_1(self.bn2_1(self.conv2_1(x)))
-        x = self.elu2_2(self.bn2_2(self.conv2_2(x)))
-        x = self.dropout(self.pool2(x))
+        # ConvBlock 2
+        x = self.conv2_1(x)
+        x = self.bn2_1(x)
+        x = self.elu2_1(x)
+        x = self.conv2_2(x)
+        x = self.bn2_2(x)
+        x = self.elu2_2(x)
+        x = self.pool2(x)
+        x = self.dropout(x)
         
-        x = self.elu3_1(self.bn3_1(self.conv3_1(x)))
-        x = self.elu3_2(self.bn3_2(self.conv3_2(x)))
-        x = self.dropout(self.pool3(x))
+        # ConvBlock 3
+        x = self.conv3_1(x)
+        x = self.bn3_1(x)
+        x = self.elu3_1(x)
+        x = self.conv3_2(x)
+        x = self.bn3_2(x)
+        x = self.elu3_2(x)
+        x = self.pool3(x)
+        x = self.dropout(x)
         
-        x = self.elu4_1(self.bn4_1(self.conv4_1(x)))
-        x = self.elu4_2(self.bn4_2(self.conv4_2(x)))
-        x = self.dropout(self.pool4(x))
+        # ConvBlock 4
+        x = self.conv4_1(x)
+        x = self.bn4_1(x)
+        x = self.elu4_1(x)
+        x = self.conv4_2(x)
+        x = self.bn4_2(x)
+        x = self.elu4_2(x)
+        x = self.pool4(x)
+        x = self.dropout(x)
         
-        x = self.elu5_1(self.bn5_1(self.conv5_1(x)))
-        x = self.elu5_2(self.bn5_2(self.conv5_2(x)))
+        # ConvBlock 5
+        x = self.conv5_1(x)
+        x = self.bn5_1(x)
+        x = self.elu5_1(x)
+        x = self.conv5_2(x)
+        x = self.bn5_2(x)
+        x = self.elu5_2(x)
         x = self.upsample(x)
         
-        x = self.elu6_1(self.bn6_1(self.conv6_1(x)))
-        x = self.elu6_2(self.bn6_2(self.conv6_2(x)))
+        # ConvBlock 6
+        x = self.conv6_1(x)
+        x = self.bn6_1(x)
+        x = self.elu6_1(x)
+        x = self.conv6_2(x)
+        x = self.bn6_2(x)
+        x = self.elu6_2(x)
         
+        # Spatial Global Average Pooling
         x = self.spatial_pool(x)
+        
+        # Final Conv
         x = self.conv_final(x)
         
-        # 出力形状: (B, output_channels, T, 1, 1)
-        x = x.squeeze(-1).squeeze(-1)  # (B, output_channels, T)
-        x = x.permute(0, 2, 1)  # (B, T, output_channels)
-        
-        # 元の時間長に補間
-        if x.size(1) != time_frames:
-            x = x.permute(0, 2, 1)  # (B, output_channels, T)
-            x = F.interpolate(x, size=time_frames, mode='linear', align_corners=False)
-            x = x.permute(0, 2, 1)  # (B, T, output_channels)
-        
-        # 単一出力の場合は次元を削除
+        # 出力を整形 - 複数出力対応の修正
         if self.output_channels == 1:
-            x = x.squeeze(-1)
+            # 単一出力の場合（元のコードと同じ）
+            x = x.squeeze(1).squeeze(-1).squeeze(-1)
+            
+            # 元の時間長に補間
+            if x.size(-1) != time_frames:
+                x = F.interpolate(x.unsqueeze(1), size=time_frames, mode='linear', align_corners=False)
+                x = x.squeeze(1)
+        else:
+            # 複数出力の場合
+            x = x.squeeze(-1).squeeze(-1)  # (B, output_channels, T)
+            x = x.permute(0, 2, 1)  # (B, T, output_channels)
+            
+            # 元の時間長に補間
+            if x.size(1) != time_frames:
+                x = x.permute(0, 2, 1)  # (B, output_channels, T)
+                x = F.interpolate(x, size=time_frames, mode='linear', align_corners=False)
+                x = x.permute(0, 2, 1)  # (B, T, output_channels)
         
         return x
 
