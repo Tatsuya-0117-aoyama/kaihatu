@@ -992,25 +992,21 @@ class PhysNet2DCNN_3D(nn.Module):
         # Final Conv
         x = self.conv_final(x)
         
-        # 出力を整形 - 複数出力対応の修正
+        # 出力を整形 - 修正版
+        x = x.squeeze(-1).squeeze(-1)  # (B, output_channels, T')
+        current_time_frames = x.size(-1)
+        
+        # 元の時間長に補間
+        if current_time_frames != time_frames:
+            x = F.interpolate(x, size=time_frames, mode='linear', align_corners=False)
+        
+        # 出力形状を調整
         if self.output_channels == 1:
-            # 単一出力の場合（元のコードと同じ）
-            x = x.squeeze(1).squeeze(-1).squeeze(-1)
-            
-            # 元の時間長に補間
-            if x.size(-1) != time_frames:
-                x = F.interpolate(x.unsqueeze(1), size=time_frames, mode='linear', align_corners=False)
-                x = x.squeeze(1)
+            # 単一出力の場合: (B, 1, T) -> (B, T)
+            x = x.squeeze(1)
         else:
-            # 複数出力の場合
-            x = x.squeeze(-1).squeeze(-1)  # (B, output_channels, T)
-            x = x.permute(0, 2, 1)  # (B, T, output_channels)
-            
-            # 元の時間長に補間
-            if x.size(1) != time_frames:
-                x = x.permute(0, 2, 1)  # (B, output_channels, T)
-                x = F.interpolate(x, size=time_frames, mode='linear', align_corners=False)
-                x = x.permute(0, 2, 1)  # (B, T, output_channels)
+            # 複数出力の場合: (B, output_channels, T) -> (B, T, output_channels)
+            x = x.permute(0, 2, 1)
         
         return x
 
@@ -1166,12 +1162,13 @@ class PhysNet2DCNN_2D_Multi(nn.Module):
         x = self.temporal_elu2(self.temporal_bn2(self.temporal_conv2(x)))
         x = x.permute(0, 2, 1)
         
-        x = self.fc(x)
+        x = self.fc(x)  # (B, T, output_channels)
         
         # 単一出力の場合は次元を削除
         if self.output_channels == 1:
-            x = x.squeeze(-1)
-        
+            x = x.squeeze(-1)  # (B, T)
+        # 複数出力の場合はそのまま: (B, T, output_channels)
+    
         return x
 # ================================
 # モデル作成関数
