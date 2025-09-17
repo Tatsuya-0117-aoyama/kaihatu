@@ -1191,21 +1191,56 @@ def create_model(config):
 # データ読み込み関数（複数指標対応）
 # ================================
 def load_data_single_subject(subject, config):
-    """単一被験者のデータを読み込み（LABデータ対応、現在の指標用）"""
+    """単一被験者のデータを読み込み（現在の指標用）"""
     
-    # ... 既存のRGBデータ読み込み処理 ...
+    # RGBデータの読み込み（共通）
+    rgb_path = os.path.join(config.rgb_base_path, subject, 
+                            f"{subject}_downsampled_1Hz.npy")
+    if not os.path.exists(rgb_path):
+        print(f"警告: {subject}のRGBデータが見つかりません: {rgb_path}")
+        return None, None
     
-    # 信号データの読み込み
+    rgb_data = np.load(rgb_path)
+    
+    # データのリサイズ（14x16 → 36x36）
+    resized_rgb = np.zeros((rgb_data.shape[0], 36, 36, rgb_data.shape[-1]))
+    for i in range(rgb_data.shape[0]):
+        for c in range(rgb_data.shape[-1]):
+            resized_rgb[i, :, :, c] = cv2.resize(rgb_data[i, :, :, c], (36, 36))
+    rgb_data = resized_rgb
+    
+    # LABデータの読み込み（オプション）
+    if config.use_lab:
+        lab_path = os.path.join(config.rgb_base_path, subject, 
+                                f"{subject}_downsampled_1Hzver2.npy")
+        
+        if os.path.exists(lab_path):
+            lab_data = np.load(lab_path)
+            resized_lab = np.zeros((lab_data.shape[0], 36, 36, lab_data.shape[-1]))
+            for i in range(lab_data.shape[0]):
+                for c in range(lab_data.shape[-1]):
+                    resized_lab[i, :, :, c] = cv2.resize(lab_data[i, :, :, c], (36, 36))
+            lab_data = resized_lab
+            
+            if rgb_data.shape == lab_data.shape:
+                combined_data = np.concatenate([rgb_data, lab_data], axis=-1)
+                if lab_data.max() > 1.0:
+                    combined_data[..., 3:] = combined_data[..., 3:] / 255.0
+                rgb_data = combined_data
+    
+    # 信号データの読み込み（現在の指標）
     signal_data_list = []
     for task in config.tasks:
-        # ... 既存のファイル読み込み処理 ...
+        signal_path = os.path.join(config.signal_base_path, subject, 
+                                  config.current_signal_type,  # 現在の指標を使用
+                                  f"{config.current_signal_prefix}_{task}.npy")
+        if not os.path.exists(signal_path):
+            print(f"警告: {subject}の{task}の{config.current_signal_type}データが見つかりません")
+            return None, None
         signal_data_list.append(np.load(signal_path))
     
     signal_data = np.concatenate(signal_data_list)
     
-    # ================================
-    # 信号データの正規化（ここに追加）
-    # ================================
     if config.signal_normalization != 'none':
         if config.signal_norm_per_subject:
             # 被験者ごとの正規化
@@ -1225,14 +1260,13 @@ def load_data_single_subject(subject, config):
                     print(f"    元の平均: {norm_params['mean']:.3f}, 標準偏差: {norm_params['std']:.3f}")
                 elif config.signal_normalization == 'robust':
                     print(f"    元の中央値: {norm_params['median']:.3f}, IQR: {norm_params['iqr']:.3f}")
-    
-    # データの正規化（RGBは0-1の範囲に）
-    if rgb_data[..., :3].max() > 1.0:  # RGBチャンネルのみチェック
+    # データの正規化
+    if rgb_data[..., :3].max() > 1.0:
         rgb_data[..., :3] = rgb_data[..., :3] / 255.0
     
     return rgb_data, signal_data
 
- ================================
+# ================================
 # データ読み込み関数（複数指標対応）
 # ================================
 def load_data_single_subject(subject, config):
