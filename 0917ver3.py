@@ -1232,6 +1232,99 @@ def load_data_single_subject(subject, config):
     
     return rgb_data, signal_data
 
+ ================================
+# データ読み込み関数（複数指標対応）
+# ================================
+def load_data_single_subject(subject, config):
+    """単一被験者のデータを読み込み（LABデータ対応、現在の指標用）"""
+    
+    # すべてのモデルで同じRGBデータファイルを使用
+    rgb_path = os.path.join(config.rgb_base_path, subject, 
+                            f"{subject}_downsampled_1Hz.npy")
+    if not os.path.exists(rgb_path):
+        print(f"警告: {subject}のRGBデータが見つかりません: {rgb_path}")
+        return None, None
+    
+    rgb_data = np.load(rgb_path)  # Shape: (360, 14, 16, 3)
+    
+    # データのリサイズ（14x16 → 36x36）
+    resized_rgb = np.zeros((rgb_data.shape[0], 36, 36, rgb_data.shape[-1]))
+    for i in range(rgb_data.shape[0]):
+        for c in range(rgb_data.shape[-1]):
+            resized_rgb[i, :, :, c] = cv2.resize(rgb_data[i, :, :, c], (36, 36))
+    rgb_data = resized_rgb
+    
+    # LABデータの読み込み（オプション）
+    if config.use_lab:
+        lab_path = os.path.join(config.rgb_base_path, subject, 
+                                f"{subject}_downsampled_1Hzver2.npy")
+        
+        if not os.path.exists(lab_path):
+            print(f"警告: {subject}のLABデータが見つかりません: {lab_path}")
+            print(f"  LABデータなしで処理を続行します。")
+            config.use_lab = False
+            config.use_channel = 'RGB'
+            config.num_channels = 3
+        else:
+            lab_data = np.load(lab_path)
+            # LABデータもリサイズ
+            resized_lab = np.zeros((lab_data.shape[0], 36, 36, lab_data.shape[-1]))
+            for i in range(lab_data.shape[0]):
+                for c in range(lab_data.shape[-1]):
+                    resized_lab[i, :, :, c] = cv2.resize(lab_data[i, :, :, c], (36, 36))
+            lab_data = resized_lab
+            
+            if rgb_data.shape == lab_data.shape:
+                combined_data = np.concatenate([rgb_data, lab_data], axis=-1)
+                
+                if lab_data.max() > 1.0:
+                    combined_data[..., 3:] = combined_data[..., 3:] / 255.0
+                
+                rgb_data = combined_data
+    
+　　# 信号データの読み込み
+    signal_data_list = []
+    for task in config.tasks:
+        # ... 既存のファイル読み込み処理 ...
+        signal_data_list.append(np.load(signal_path))
+    
+    signal_data = np.concatenate(signal_data_list)
+    
+    # ================================
+    # 信号データの正規化（ここに追加）
+    # ================================
+    if config.signal_normalization != 'none':
+        if config.signal_norm_per_subject:
+            # 被験者ごとの正規化
+            signal_data, norm_params = normalize_signal(
+                signal_data, 
+                method=config.signal_normalization,
+                return_params=True
+            )
+            # 正規化パラメータを保存（推論時に必要）
+            config.norm_params[subject] = norm_params
+            
+            if config.verbose and config.model_mode == 'within_subject':
+                print(f"  {subject}の信号正規化 ({config.signal_normalization}):")
+                if config.signal_normalization == 'min-max':
+                    print(f"    元の範囲: [{norm_params['min']:.3f}, {norm_params['max']:.3f}]")
+                elif config.signal_normalization == 'z-score':
+                    print(f"    元の平均: {norm_params['mean']:.3f}, 標準偏差: {norm_params['std']:.3f}")
+                elif config.signal_normalization == 'robust':
+                    print(f"    元の中央値: {norm_params['median']:.3f}, IQR: {norm_params['iqr']:.3f}")
+    
+    # データの正規化（RGBは0-1の範囲に）
+    if rgb_data[..., :3].max() > 1.0:  # RGBチャンネルのみチェック
+        rgb_data[..., :3] = rgb_data[..., :3] / 255.0
+    
+    return rgb_data, signal_data
+    
+    # データの正規化（0-1の範囲に）
+    if rgb_data[..., :3].max() > 1.0:  # RGBチャンネルのみチェック
+        rgb_data[..., :3] = rgb_data[..., :3] / 255.0
+    
+    return rgb_data, signal_data
+
 def load_all_subjects_data(config):
     """全被験者のデータを読み込み（Cross-Subject用、現在の指標用）"""
     all_rgb_data = []
@@ -1239,13 +1332,6 @@ def load_all_subjects_data(config):
     subject_task_info = []
     
     print(f"\n全被験者データ読み込み中（{config.current_signal_type}）...")
-    
-    # 一時的に正規化を無効化してデータを収集
-    temp_norm = config.signal_normalization
-    temp_norm_per_subject = config.signal_norm_per_subject
-    
-    if not config.signal_norm_per_subject and config.signal_normalization != 'none':
-        config.signal_normalization = 'none'  # 一旦無効化
     
     for subject in config.subjects:
         rgb_data, signal_data = load_data_single_subject(subject, config)
@@ -1271,45 +1357,8 @@ def load_all_subjects_data(config):
                 'task_idx': task_idx
             })
     
-    all_rgb_data = np.array(all_rgb_data)
-    all_signal_data = np.array(all_signal_data)
-    
-    # ================================
-    # 全体での正規化（必要な場合）（ここに追加）
-    # ================================
-    config.signal_normalization = temp_norm
-    config.signal_norm_per_subject = temp_norm_per_subject
-    
-    if not config.signal_norm_per_subject and config.signal_normalization != 'none':
-        print(f"\n  全体での信号正規化 ({config.signal_normalization})を実行中...")
-        
-        # 全データで正規化パラメータを計算
-        all_signal_flat = all_signal_data.flatten()
-        _, norm_params = normalize_signal(
-            all_signal_flat,
-            method=config.signal_normalization,
-            return_params=True
-        )
-        
-        # 各サンプルに適用
-        normalized_signals = []
-        for i in range(len(all_signal_data)):
-            normalized_signal = normalize_signal(
-                all_signal_data[i],
-                method=config.signal_normalization
-            )
-            normalized_signals.append(normalized_signal)
-        
-        all_signal_data = np.array(normalized_signals)
-        config.norm_params['global'] = norm_params
-        
-        print(f"  全体正規化パラメータ:")
-        if config.signal_normalization == 'min-max':
-            print(f"    範囲: [{norm_params['min']:.3f}, {norm_params['max']:.3f}]")
-        elif config.signal_normalization == 'z-score':
-            print(f"    平均: {norm_params['mean']:.3f}, 標準偏差: {norm_params['std']:.3f}")
-        elif config.signal_normalization == 'robust':
-            print(f"    中央値: {norm_params['median']:.3f}, IQR: {norm_params['iqr']:.3f}")
+    all_rgb_data = np.array(all_rgb_data)  # (N_samples, 60, H, W, C)
+    all_signal_data = np.array(all_signal_data)  # (N_samples, 60)
     
     print(f"  読み込み完了: {len(all_rgb_data)}タスク分のデータ")
     print(f"  データ形状: RGB={all_rgb_data.shape}, Signal={all_signal_data.shape}")
