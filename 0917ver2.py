@@ -712,22 +712,22 @@ class MultiSignalDataset(Dataset):
         self.rgb_data_raw = rgb_data
         self.signal_data_raw = signal_data
         
+        # チャンネル選択を適用
         rgb_data_selected = select_channels(rgb_data, use_channel)
         
         self.rgb_data = torch.FloatTensor(rgb_data_selected)
         
         # 信号データの処理（複数指標対応）
+        # signal_dataの形状を確認して適切に処理
         if signal_data.ndim == 1:
-            # 単一指標で時間次元なし
-            signal_data = np.repeat(signal_data[:, np.newaxis], rgb_data.shape[1], axis=1)
-            signal_data = signal_data[:, :, np.newaxis]  # (N, T, 1)
+            # (N,) -> (N, T, 1) 単一値を時間次元に拡張
+            signal_data = np.repeat(signal_data[:, np.newaxis, np.newaxis], rgb_data.shape[1], axis=1)
         elif signal_data.ndim == 2:
-            # 判定が必要: (N, T) or (N, n_signals)
             if signal_data.shape[1] == rgb_data.shape[1]:
-                # (N, T) - 単一指標で時間次元あり
-                signal_data = signal_data[:, :, np.newaxis]  # (N, T, 1)
+                # (N, T) -> (N, T, 1) 時系列データ
+                signal_data = signal_data[:, :, np.newaxis]
             else:
-                # (N, n_signals) - 複数指標で時間次元なし
+                # (N, n_signals) -> (N, T, n_signals) 複数指標を時間次元に拡張
                 n_samples, n_signals = signal_data.shape
                 expanded_signal = np.zeros((n_samples, rgb_data.shape[1], n_signals))
                 for i in range(n_signals):
@@ -736,55 +736,61 @@ class MultiSignalDataset(Dataset):
         elif signal_data.ndim == 3:
             # (N, T, n_signals) - そのまま使用
             pass
+        else:
+            raise ValueError(f"Unexpected signal_data shape: {signal_data.shape}")
         
         self.signal_data = torch.FloatTensor(signal_data)
+        
+        # 形状確認
+        assert self.rgb_data.shape[0] == self.signal_data.shape[0], \
+            f"Sample count mismatch: RGB={self.rgb_data.shape[0]}, Signal={self.signal_data.shape[0]}"
+        assert self.rgb_data.shape[1] == self.signal_data.shape[1], \
+            f"Time dimension mismatch: RGB={self.rgb_data.shape[1]}, Signal={self.signal_data.shape[1]}"
     
     def __len__(self):
         return len(self.rgb_data)
     
     def __getitem__(self, idx):
-        # 元データを取得
-        rgb = self.rgb_data_raw[idx]
-        signal = self.signal_data_raw[idx]
+        # 処理済みのテンソルを直接返す（シンプルに）
+        rgb = self.rgb_data[idx]
+        signal = self.signal_data[idx]
         
-        # データ拡張を適用（学習時のみ）
+        # データ拡張が必要な場合は元データから処理
         if self.augmentation and self.is_training:
-            rgb, signal = self.augmentation.apply_augmentation(rgb, signal, self.is_training)
-        
-        # チャンネル選択
-        rgb = select_channels(rgb, self.use_channel)
-        
-        # ========================================
-        # 元コードに合わせた修正部分
-        # ========================================
-        # Tensorに変換
-        rgb_tensor = torch.FloatTensor(rgb)
-        signal_tensor = torch.FloatTensor(signal if isinstance(signal, np.ndarray) else [signal])
-        
-        # 次元調整（元コードと同じロジック）
-        if signal_tensor.dim() == 0:
-            signal_tensor = signal_tensor.unsqueeze(0)
-        
-        # 単一値を時間次元に拡張
-        if signal_tensor.size(0) == 1 and rgb_tensor.size(0) > 1:
-            signal_tensor = signal_tensor.repeat(rgb_tensor.size(0))
-        
-        # 複数指標の場合の追加処理
-        elif signal_tensor.dim() == 1:
-            # 複数指標で時間次元がない場合
-            if len(signal_tensor) != rgb_tensor.size(0):
-                # 複数指標を時間次元に拡張
-                signal_tensor = signal_tensor.unsqueeze(0).repeat(rgb_tensor.size(0), 1)
+            rgb_np = self.rgb_data_raw[idx]
+            signal_np = self.signal_data_raw[idx]
+            
+            # データ拡張を適用
+            rgb_np, signal_np = self.augmentation.apply_augmentation(rgb_np, signal_np, self.is_training)
+            
+            # チャンネル選択
+            rgb_np = select_channels(rgb_np, self.use_channel)
+            
+            # Tensorに変換
+            rgb = torch.FloatTensor(rgb_np)
+            
+            # signalの処理
+            if isinstance(signal_np, np.ndarray):
+                if signal_np.ndim == 0:
+                    # スカラー -> (T, 1)
+                    signal = torch.FloatTensor([signal_np]).repeat(rgb.shape[0], 1)
+                elif signal_np.ndim == 1:
+                    if len(signal_np) == rgb.shape[0]:
+                        # (T,) -> (T, 1)
+                        signal = torch.FloatTensor(signal_np).unsqueeze(1)
+                    else:
+                        # (n_signals,) -> (T, n_signals)
+                        signal = torch.FloatTensor(signal_np).unsqueeze(0).repeat(rgb.shape[0], 1)
+                elif signal_np.ndim == 2:
+                    # (T, n_signals) そのまま
+                    signal = torch.FloatTensor(signal_np)
+                else:
+                    raise ValueError(f"Unexpected augmented signal shape: {signal_np.shape}")
             else:
-                # 時間次元のみの場合は最後に次元追加
-                signal_tensor = signal_tensor.unsqueeze(1)
+                # スカラー値の場合
+                signal = torch.FloatTensor([signal_np]).repeat(rgb.shape[0], 1)
         
-        # 3次元データ（時間×指標）の場合はそのまま
-        elif signal_tensor.dim() == 2:
-            # (T, n_signals) の形状を維持
-            pass
-        
-        return rgb_tensor, signal_tensor
+        return rgb, signal
 
 # ================================
 # PhysNet2DCNN (3D版) - 複数出力対応
