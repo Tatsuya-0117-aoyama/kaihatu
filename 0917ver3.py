@@ -1282,13 +1282,27 @@ def load_data_single_subject(subject, config):
                 
                 rgb_data = combined_data
     
-　　# 信号データの読み込み
+    # 信号データの読み込み（現在の指標）
     signal_data_list = []
     for task in config.tasks:
-        # ... 既存のファイル読み込み処理 ...
+        # Cross-Subjectモードでは現在の指標を使用
+        if config.model_mode == 'cross_subject':
+            signal_path = os.path.join(config.signal_base_path, subject, 
+                                      config.current_signal_type, 
+                                      f"{config.current_signal_prefix}_{task}.npy")
+        else:
+            # Within-Subjectモードでは従来通り
+            signal_path = os.path.join(config.signal_base_path, subject, 
+                                      config.signal_type, 
+                                      f"{config.signal_prefix}_{task}.npy")
+        
+        if not os.path.exists(signal_path):
+            if config.model_mode == 'cross_subject':
+                print(f"警告: {subject}の{task}の{config.current_signal_type}データが見つかりません")
+            else:
+                print(f"警告: {subject}の{task}の{config.signal_type}データが見つかりません")
+            return None, None
         signal_data_list.append(np.load(signal_path))
-    
-    signal_data = np.concatenate(signal_data_list)
     
     # ================================
     # 信号データの正規化（ここに追加）
