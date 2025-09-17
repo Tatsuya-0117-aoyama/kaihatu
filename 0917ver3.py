@@ -8,6 +8,7 @@ from torch.cuda.amp import autocast, GradScaler  # AMP用
 import matplotlib.pyplot as plt
 import matplotlib as mpl
 from sklearn.metrics import mean_absolute_error
+from sklearn.preprocessing import StandardScaler
 from scipy.stats import pearsonr
 from scipy.ndimage import rotate as scipy_rotate
 from scipy.interpolate import interp1d
@@ -18,6 +19,8 @@ from datetime import datetime
 import warnings
 import random
 import pandas as pd
+import pickle
+import time
 warnings.filterwarnings('ignore')
 
 # フォント設定（メイリオ）
@@ -65,16 +68,6 @@ class Config:
         self.model_mode = 'cross_subject'  # 'within_subject' or 'cross_subject'
         
         # ================================
-        # 信号正規化設定
-        # ================================
-        self.signal_normalization = 'z-score'  # 'none', 'min-max', 'z-score', 'robust'
-        self.signal_norm_per_subject = True  # True: 被験者ごと, False: 全体で正規化
-        self.signal_norm_per_task = False  # True: タスクごと, False: 全タスクまとめて
-        
-        # 正規化パラメータ保存用（推論時に必要）
-        self.norm_params = {}
-        
-        # ================================
         # 血行動態信号タイプ設定（複数選択可能）
         # ================================
         # 利用可能な指標
@@ -95,6 +88,12 @@ class Config:
         self.signal_type = self.current_signal_type
         self.signal_prefix = self.current_signal_prefix
         
+        # ================================
+        # 信号正規化設定
+        # ================================
+        self.normalize_signal = True  # 信号データの正規化を行うか
+        self.signal_normalization_method = 'standard'  # 'standard', 'minmax', 'robust'
+        
         # パス設定
         self.rgb_base_path = r"C:\Users\EyeBelow"
         self.signal_base_path = r"C:\Users\Data_signals_bp"
@@ -109,7 +108,7 @@ class Config:
         # ================================
         self.use_amp = True  # Automatic Mixed Precision使用
         self.use_compile = False  # torch.compile使用（PyTorch 2.0+）
-        self.num_workers = 0  # DataLoaderのワーカー数
+        self.num_workers = 0  # DataLoaderのワーカー数（Windowsでは0推奨）
         self.pin_memory = True  # GPU転送の高速化
         self.persistent_workers = True  # ワーカーの再利用
         self.prefetch_factor = None  # 先読みバッチ数
@@ -280,6 +279,116 @@ class Config:
         self.signal_type = signal_type
         self.signal_prefix = f"{signal_type}_s2"
 
+# ================================
+# 信号正規化クラス
+# ================================
+class SignalNormalizer:
+    """信号データの正規化を管理するクラス"""
+    
+    def __init__(self, method='standard'):
+        """
+        Args:
+            method: 正規化方法 ('standard', 'minmax', 'robust')
+        """
+        self.method = method
+        self.scaler = None
+        self.is_fitted = False
+        
+    def fit(self, signal_data):
+        """正規化パラメータを学習"""
+        if self.method == 'standard':
+            # 標準化（平均0、標準偏差1）
+            self.mean = np.mean(signal_data)
+            self.std = np.std(signal_data)
+            if self.std == 0:
+                self.std = 1.0
+        elif self.method == 'minmax':
+            # Min-Max正規化（0-1の範囲）
+            self.min = np.min(signal_data)
+            self.max = np.max(signal_data)
+            if self.max - self.min == 0:
+                self.max = self.min + 1.0
+        elif self.method == 'robust':
+            # ロバスト正規化（中央値と四分位範囲）
+            self.median = np.median(signal_data)
+            q1 = np.percentile(signal_data, 25)
+            q3 = np.percentile(signal_data, 75)
+            self.iqr = q3 - q1
+            if self.iqr == 0:
+                self.iqr = 1.0
+        else:
+            raise ValueError(f"Unknown normalization method: {self.method}")
+        
+        self.is_fitted = True
+    
+    def transform(self, signal_data):
+        """信号データを正規化"""
+        if not self.is_fitted:
+            raise RuntimeError("Normalizer must be fitted before transform")
+        
+        if self.method == 'standard':
+            return (signal_data - self.mean) / self.std
+        elif self.method == 'minmax':
+            return (signal_data - self.min) / (self.max - self.min)
+        elif self.method == 'robust':
+            return (signal_data - self.median) / self.iqr
+    
+    def fit_transform(self, signal_data):
+        """学習と変換を同時に実行"""
+        self.fit(signal_data)
+        return self.transform(signal_data)
+    
+    def inverse_transform(self, normalized_data):
+        """正規化された信号データを元に戻す"""
+        if not self.is_fitted:
+            raise RuntimeError("Normalizer must be fitted before inverse_transform")
+        
+        if self.method == 'standard':
+            return normalized_data * self.std + self.mean
+        elif self.method == 'minmax':
+            return normalized_data * (self.max - self.min) + self.min
+        elif self.method == 'robust':
+            return normalized_data * self.iqr + self.median
+    
+    def save(self, filepath):
+        """正規化パラメータを保存"""
+        params = {
+            'method': self.method,
+            'is_fitted': self.is_fitted
+        }
+        
+        if self.is_fitted:
+            if self.method == 'standard':
+                params['mean'] = self.mean
+                params['std'] = self.std
+            elif self.method == 'minmax':
+                params['min'] = self.min
+                params['max'] = self.max
+            elif self.method == 'robust':
+                params['median'] = self.median
+                params['iqr'] = self.iqr
+        
+        with open(filepath, 'wb') as f:
+            pickle.dump(params, f)
+    
+    def load(self, filepath):
+        """正規化パラメータを読み込み"""
+        with open(filepath, 'rb') as f:
+            params = pickle.load(f)
+        
+        self.method = params['method']
+        self.is_fitted = params['is_fitted']
+        
+        if self.is_fitted:
+            if self.method == 'standard':
+                self.mean = params['mean']
+                self.std = params['std']
+            elif self.method == 'minmax':
+                self.min = params['min']
+                self.max = params['max']
+            elif self.method == 'robust':
+                self.median = params['median']
+                self.iqr = params['iqr']
 
 # ================================
 # データ拡張関数
@@ -389,6 +498,7 @@ class DataAugmentation:
                                     kind='linear', fill_value='extrapolate')
             signal_resampled = f_signal_back(np.linspace(0, len(signal_stretched)-1, t_original))
             
+            # ストレッチングに応じてスケール調整（エネルギー保存）
             signal_resampled = signal_resampled * stretch_factor
             
             return rgb_stretched, signal_resampled
@@ -407,6 +517,7 @@ class DataAugmentation:
         
         data_adjusted = data.copy()
         
+        # 各フレームごとに調整（時間軸がある場合）
         mean = np.mean(data_adjusted, axis=tuple(range(data_adjusted.ndim-1)), keepdims=True)
         data_adjusted = (data_adjusted - mean) * contrast_factor + mean
         data_adjusted = data_adjusted + brightness_delta
@@ -419,12 +530,15 @@ class DataAugmentation:
         if not is_training or not self.config.use_augmentation:
             return rgb_data, signal_data
         
+        # 空間的な拡張
         rgb_data = self.random_crop(rgb_data)
         rgb_data = self.random_rotation(rgb_data)
         
+        # 時間的な拡張
         if rgb_data.ndim == 4 and self.config.time_stretch_enabled:
             rgb_data, signal_data = self.time_stretch(rgb_data, signal_data)
         
+        # 明度・コントラスト調整
         rgb_data = self.brightness_contrast_adjust(rgb_data)
         
         return rgb_data, signal_data
@@ -441,8 +555,10 @@ class CombinedLoss(nn.Module):
         self.mse = nn.MSELoss()
     
     def forward(self, pred, target):
+        # MSE損失
         mse_loss = self.mse(pred, target)
         
+        # 相関損失（ベクトル化）
         if pred.dim() == 2 and pred.size(1) > 1:  # (B, T)形状の場合
             pred_centered = pred - torch.mean(pred, dim=1, keepdim=True)
             target_centered = target - torch.mean(target, dim=1, keepdim=True)
@@ -481,8 +597,10 @@ class HuberCorrelationLoss(nn.Module):
         self.huber = nn.HuberLoss(delta=delta)
     
     def forward(self, pred, target):
+        # Huber損失
         huber_loss = self.huber(pred, target)
         
+        # 相関損失（ベクトル化）
         if pred.dim() == 2 and pred.size(1) > 1:  # (B, T)形状の場合
             pred_centered = pred - torch.mean(pred, dim=1, keepdim=True)
             target_centered = target - torch.mean(target, dim=1, keepdim=True)
@@ -544,124 +662,50 @@ def select_channels(data, use_channel):
         raise ValueError(f"Unknown channel type: {use_channel}")
 
 # ================================
-# 信号正規化関数（ここに追加）
-# ================================
-def normalize_signal(signal_data, method='z-score', return_params=False):
-    """信号データの正規化"""
-    import warnings
-    from scipy import stats
-    
-    original_shape = signal_data.shape
-    signal_flat = signal_data.flatten()
-    
-    if method == 'none':
-        if return_params:
-            return signal_data, {}
-        return signal_data
-    
-    elif method == 'min-max':
-        # Min-Max正規化 (0-1範囲)
-        min_val = np.min(signal_flat)
-        max_val = np.max(signal_flat)
-        
-        if max_val - min_val < 1e-8:
-            warnings.warn(f"信号の範囲が非常に小さいです: [{min_val}, {max_val}]")
-            normalized = np.zeros_like(signal_flat)
-        else:
-            normalized = (signal_flat - min_val) / (max_val - min_val)
-        
-        params = {'method': 'min-max', 'min': min_val, 'max': max_val}
-    
-    elif method == 'z-score':
-        # Z-score正規化 (平均0、標準偏差1)
-        mean_val = np.mean(signal_flat)
-        std_val = np.std(signal_flat)
-        
-        if std_val < 1e-8:
-            warnings.warn(f"信号の標準偏差が非常に小さいです: {std_val}")
-            normalized = signal_flat - mean_val
-        else:
-            normalized = (signal_flat - mean_val) / std_val
-        
-        params = {'method': 'z-score', 'mean': mean_val, 'std': std_val}
-    
-    elif method == 'robust':
-        # Robust正規化 (中央値と四分位範囲を使用、外れ値に強い)
-        median_val = np.median(signal_flat)
-        q75, q25 = np.percentile(signal_flat, [75, 25])
-        iqr = q75 - q25
-        
-        if iqr < 1e-8:
-            warnings.warn(f"信号のIQRが非常に小さいです: {iqr}")
-            normalized = signal_flat - median_val
-        else:
-            normalized = (signal_flat - median_val) / iqr
-        
-        params = {'method': 'robust', 'median': median_val, 'iqr': iqr, 'q25': q25, 'q75': q75}
-    
-    else:
-        raise ValueError(f"Unknown normalization method: {method}")
-    
-    # 元の形状に戻す
-    normalized = normalized.reshape(original_shape)
-    
-    if return_params:
-        return normalized, params
-    return normalized
-
-def denormalize_signal(normalized_data, params):
-    """正規化された信号データを元に戻す"""
-    method = params.get('method', 'none')
-    
-    if method == 'none':
-        return normalized_data
-    
-    elif method == 'min-max':
-        min_val = params['min']
-        max_val = params['max']
-        return normalized_data * (max_val - min_val) + min_val
-    
-    elif method == 'z-score':
-        mean_val = params['mean']
-        std_val = params['std']
-        return normalized_data * std_val + mean_val
-    
-    elif method == 'robust':
-        median_val = params['median']
-        iqr = params['iqr']
-        return normalized_data * iqr + median_val
-    
-    else:
-        raise ValueError(f"Unknown normalization method: {method}")
-
-# ================================
 # 層化サンプリング関数（Within-Subject用）
 # ================================
 def stratified_sampling_split(task_rgb, task_signal, val_ratio=0.1, n_strata=5, method='quantile'):
-    """信号値の分布を保持したまま訓練・検証データを分割"""
+    """信号値の分布を保持したまま訓練・検証データを分割
+    
+    Args:
+        task_rgb: RGBデータ (T, H, W, C)
+        task_signal: 信号データ (T,)
+        val_ratio: 検証データの割合
+        n_strata: 層の数
+        method: 分割方法 ('equal_range' or 'quantile')
+    
+    Returns:
+        train_rgb, train_signal, val_rgb, val_signal
+    """
     
     n_samples = len(task_signal)
     
+    # 信号値の統計情報
     signal_min = task_signal.min()
     signal_max = task_signal.max()
     signal_mean = task_signal.mean()
     signal_std = task_signal.std()
     
+    # ビンエッジの計算
     if method == 'equal_range':
+        # 等間隔分割
         bin_edges = np.linspace(signal_min, signal_max + 1e-10, n_strata + 1)
     elif method == 'quantile':
+        # 分位数ベースの分割
         quantiles = np.linspace(0, 1, n_strata + 1)
         bin_edges = np.quantile(task_signal, quantiles)
-        bin_edges[-1] += 1e-10
+        bin_edges[-1] += 1e-10  # 最大値を含むように調整
     else:
         raise ValueError(f"Unknown stratification method: {method}")
     
+    # 各サンプルの層への割り当て
     strata_assignment = np.digitize(task_signal, bin_edges) - 1
     
     train_indices = []
     val_indices = []
     strata_info = []
     
+    # 各層から検証データを抽出
     for stratum_id in range(n_strata):
         stratum_mask = (strata_assignment == stratum_id)
         stratum_indices = np.where(stratum_mask)[0]
@@ -669,13 +713,16 @@ def stratified_sampling_split(task_rgb, task_signal, val_ratio=0.1, n_strata=5, 
         if len(stratum_indices) == 0:
             continue
         
+        # 層内の信号値の範囲
         stratum_signals = task_signal[stratum_indices]
         stratum_min = stratum_signals.min()
         stratum_max = stratum_signals.max()
         
+        # 層から検証データの数を決定
         n_val_from_stratum = max(1, int(len(stratum_indices) * val_ratio))
         n_train_from_stratum = len(stratum_indices) - n_val_from_stratum
         
+        # ランダムにシャッフルして分割
         np.random.shuffle(stratum_indices)
         val_from_stratum = stratum_indices[:n_val_from_stratum]
         train_from_stratum = stratum_indices[n_val_from_stratum:]
@@ -683,6 +730,7 @@ def stratified_sampling_split(task_rgb, task_signal, val_ratio=0.1, n_strata=5, 
         val_indices.extend(val_from_stratum)
         train_indices.extend(train_from_stratum)
         
+        # 層の情報を保存
         strata_info.append({
             'stratum_id': stratum_id + 1,
             'signal_range': (stratum_min, stratum_max),
@@ -691,9 +739,11 @@ def stratified_sampling_split(task_rgb, task_signal, val_ratio=0.1, n_strata=5, 
             'n_val': n_val_from_stratum
         })
     
+    # インデックスをソート
     train_indices = np.sort(train_indices)
     val_indices = np.sort(val_indices)
     
+    # 層化サンプリング詳細の表示
     if len(strata_info) > 0:
         print(f"      層化サンプリング詳細 (方法: {method}):")
         for info in strata_info:
@@ -701,6 +751,7 @@ def stratified_sampling_split(task_rgb, task_signal, val_ratio=0.1, n_strata=5, 
                   f"信号値[{info['signal_range'][0]:.3f}, {info['signal_range'][1]:.3f}] "
                   f"計{info['n_total']}個 → 訓練{info['n_train']}個, 検証{info['n_val']}個")
     
+    # 分割後の信号値分布の確認
     val_signals = task_signal[val_indices]
     train_signals = task_signal[train_indices]
     
@@ -713,24 +764,39 @@ def stratified_sampling_split(task_rgb, task_signal, val_ratio=0.1, n_strata=5, 
             task_rgb[val_indices], task_signal[val_indices])
 
 # ================================
-# データセット（データ拡張対応）
+# データセット（データ拡張・正規化対応）
 # ================================
 class CODataset(Dataset):
+    """血行動態推定用データセット
+    
+    データ拡張と信号正規化に対応
+    """
     def __init__(self, rgb_data, signal_data, model_type='3d', 
-                 use_channel='RGB', config=None, is_training=True):
+                 use_channel='RGB', config=None, is_training=True,
+                 signal_normalizer=None):
         """
-        rgb_data: (N, T, H, W, C) 形状
-        signal_data: (N, T) または (N,) 形状
+        Args:
+            rgb_data: (N, T, H, W, C) 形状のRGBデータ
+            signal_data: (N, T) または (N,) 形状の信号データ
+            model_type: モデルタイプ ('3d' or '2d')
+            use_channel: 使用チャンネル
+            config: 設定オブジェクト
+            is_training: 訓練モードかどうか
+            signal_normalizer: 信号正規化器
         """
         self.model_type = model_type
         self.use_channel = use_channel
         self.is_training = is_training
+        self.signal_normalizer = signal_normalizer
         
+        # データ拡張
         self.augmentation = DataAugmentation(config) if config else None
         
+        # 生データを保持
         self.rgb_data_raw = rgb_data
         self.signal_data_raw = signal_data
         
+        # チャンネル選択を適用
         rgb_data_selected = select_channels(rgb_data, use_channel)
         self.rgb_data = torch.FloatTensor(rgb_data_selected)
         
@@ -744,16 +810,22 @@ class CODataset(Dataset):
         return len(self.rgb_data)
     
     def __getitem__(self, idx):
+        # 生データを取得
         rgb = self.rgb_data_raw[idx]
         signal = self.signal_data_raw[idx] if self.signal_data_raw.ndim > 1 else self.signal_data_raw[idx:idx+1].squeeze()
         
+        # データ拡張を適用
         if self.augmentation and self.is_training:
             rgb, signal = self.augmentation.apply_augmentation(rgb, signal, self.is_training)
         
+        # チャンネル選択
         rgb = select_channels(rgb, self.use_channel)
         
+        # テンソル変換
         rgb_tensor = torch.FloatTensor(rgb)
         signal_tensor = torch.FloatTensor(signal if isinstance(signal, np.ndarray) else [signal])
+        
+        # 次元調整
         if signal_tensor.dim() == 0:
             signal_tensor = signal_tensor.unsqueeze(0)
         if signal_tensor.size(0) == 1 and rgb_tensor.size(0) > 1:
@@ -762,13 +834,14 @@ class CODataset(Dataset):
         return rgb_tensor, signal_tensor
 
 # ================================
-# CalibrationPhys準拠 PhysNet2DCNN (3D版)
+# PhysNet2DCNN モデル (3D版)
 # ================================
 class PhysNet2DCNN_3D(nn.Module):
     """CalibrationPhys論文準拠のPhysNet2DCNN（3D畳み込み版）"""
     def __init__(self, input_shape=None):
         super(PhysNet2DCNN_3D, self).__init__()
         
+        # 入力チャンネル数と画像サイズの設定
         if input_shape is not None:
             in_channels = input_shape[-1]
             height = input_shape[1] if len(input_shape) >= 3 else 36
@@ -789,6 +862,7 @@ class PhysNet2DCNN_3D(nn.Module):
         self.bn1_2 = nn.BatchNorm3d(32, momentum=0.01, eps=1e-5)
         self.elu1_2 = nn.ELU(inplace=True)
         
+        # プーリング層（小さい入力の場合はスキップ）
         if height <= 16 or width <= 16:
             self.pool1 = nn.Identity()
         else:
@@ -850,10 +924,14 @@ class PhysNet2DCNN_3D(nn.Module):
         self.bn6_2 = nn.BatchNorm3d(64, momentum=0.01, eps=1e-5)
         self.elu6_2 = nn.ELU(inplace=True)
         
+        # 最終層
         self.spatial_pool = nn.AdaptiveAvgPool3d((None, 1, 1))
         self.conv_final = nn.Conv3d(64, 1, kernel_size=1)
+        
+        # Dropout
         self.dropout = nn.Dropout(0.2)
         
+        # 重みの初期化
         self._initialize_weights()
     
     def _initialize_weights(self):
@@ -868,12 +946,21 @@ class PhysNet2DCNN_3D(nn.Module):
                 nn.init.constant_(m.bias, 0)
         
     def forward(self, x):
-        """入力: (B, T, H, W, C) → 出力: (B, T)"""
+        """フォワードパス
+        
+        Args:
+            x: 入力テンソル (B, T, H, W, C)
+        
+        Returns:
+            出力テンソル (B, T)
+        """
         batch_size = x.size(0)
         time_frames = x.size(1)
         
+        # チャンネルを最初の次元に移動
         x = x.permute(0, 4, 1, 2, 3)  # (B, C, T, H, W)
         
+        # ConvBlock 1
         x = self.conv1_1(x)
         x = self.bn1_1(x)
         x = self.elu1_1(x)
@@ -883,6 +970,7 @@ class PhysNet2DCNN_3D(nn.Module):
         x = self.pool1(x)
         x = self.dropout(x)
         
+        # ConvBlock 2
         x = self.conv2_1(x)
         x = self.bn2_1(x)
         x = self.elu2_1(x)
@@ -892,6 +980,7 @@ class PhysNet2DCNN_3D(nn.Module):
         x = self.pool2(x)
         x = self.dropout(x)
         
+        # ConvBlock 3
         x = self.conv3_1(x)
         x = self.bn3_1(x)
         x = self.elu3_1(x)
@@ -901,6 +990,7 @@ class PhysNet2DCNN_3D(nn.Module):
         x = self.pool3(x)
         x = self.dropout(x)
         
+        # ConvBlock 4
         x = self.conv4_1(x)
         x = self.bn4_1(x)
         x = self.elu4_1(x)
@@ -910,6 +1000,7 @@ class PhysNet2DCNN_3D(nn.Module):
         x = self.pool4(x)
         x = self.dropout(x)
         
+        # ConvBlock 5
         x = self.conv5_1(x)
         x = self.bn5_1(x)
         x = self.elu5_1(x)
@@ -918,6 +1009,7 @@ class PhysNet2DCNN_3D(nn.Module):
         x = self.elu5_2(x)
         x = self.upsample(x)
         
+        # ConvBlock 6
         x = self.conv6_1(x)
         x = self.bn6_1(x)
         x = self.elu6_1(x)
@@ -925,11 +1017,14 @@ class PhysNet2DCNN_3D(nn.Module):
         x = self.bn6_2(x)
         x = self.elu6_2(x)
         
+        # 空間プーリングと最終畳み込み
         x = self.spatial_pool(x)
         x = self.conv_final(x)
         
-        x = x.squeeze(1).squeeze(-1).squeeze(-1)
+        # 出力形状の調整
+        x = x.squeeze(1).squeeze(-1).squeeze(-1)  # (B, T)
         
+        # 時間次元が変わっている場合は補間
         if x.size(-1) != time_frames:
             x = F.interpolate(x.unsqueeze(1), size=time_frames, mode='linear', align_corners=False)
             x = x.squeeze(1)
@@ -937,13 +1032,14 @@ class PhysNet2DCNN_3D(nn.Module):
         return x
 
 # ================================
-# CalibrationPhys準拠 PhysNet2DCNN (2D版)
+# PhysNet2DCNN モデル (2D版)
 # ================================
 class PhysNet2DCNN_2D(nn.Module):
     """2D畳み込みを使用したPhysNet2DCNN（効率的な実装）"""
     def __init__(self, input_shape=None):
         super(PhysNet2DCNN_2D, self).__init__()
         
+        # 入力チャンネル数と画像サイズの設定
         if input_shape is not None:
             in_channels = input_shape[-1]
             height = input_shape[1] if len(input_shape) >= 3 else 36
@@ -982,10 +1078,7 @@ class PhysNet2DCNN_2D(nn.Module):
         self.bn2_2 = nn.BatchNorm2d(64, momentum=0.01, eps=1e-5)
         self.elu2_2 = nn.ELU(inplace=True)
         
-        if self.small_input:
-            self.pool2 = nn.AvgPool2d(kernel_size=2, stride=2)
-        else:
-            self.pool2 = nn.AvgPool2d(kernel_size=2, stride=2)
+        self.pool2 = nn.AvgPool2d(kernel_size=2, stride=2)
         
         # ConvBlock 3: 64 filters
         self.conv3_1 = nn.Conv2d(64, 64, kernel_size=3, padding=1)
@@ -1001,7 +1094,7 @@ class PhysNet2DCNN_2D(nn.Module):
         else:
             self.pool3 = nn.AvgPool2d(kernel_size=2, stride=2)
         
-        # ConvBlock 4: 64 filters（小さい入力では省略可能）
+        # ConvBlock 4: 64 filters（小さい入力では省略）
         if not self.small_input:
             self.conv4_1 = nn.Conv2d(64, 64, kernel_size=3, padding=1)
             self.bn4_1 = nn.BatchNorm2d(64, momentum=0.01, eps=1e-5)
@@ -1022,9 +1115,10 @@ class PhysNet2DCNN_2D(nn.Module):
         self.bn5_2 = nn.BatchNorm2d(64, momentum=0.01, eps=1e-5)
         self.elu5_2 = nn.ELU(inplace=True)
         
+        # 空間プーリング
         self.spatial_pool = nn.AdaptiveAvgPool2d((1, 1))
         
-        # Temporal processing
+        # 時間処理層
         self.temporal_conv1 = nn.Conv1d(64, 64, kernel_size=3, padding=1)
         self.temporal_bn1 = nn.BatchNorm1d(64, momentum=0.01, eps=1e-5)
         self.temporal_elu1 = nn.ELU(inplace=True)
@@ -1033,9 +1127,13 @@ class PhysNet2DCNN_2D(nn.Module):
         self.temporal_bn2 = nn.BatchNorm1d(32, momentum=0.01, eps=1e-5)
         self.temporal_elu2 = nn.ELU(inplace=True)
         
+        # 最終全結合層
         self.fc = nn.Linear(32, 1)
+        
+        # Dropout
         self.dropout = nn.Dropout(0.2)
         
+        # 重みの初期化
         self._initialize_weights()
     
     def _initialize_weights(self):
@@ -1053,12 +1151,21 @@ class PhysNet2DCNN_2D(nn.Module):
                 nn.init.constant_(m.bias, 0)
     
     def forward(self, x):
-        """入力: (B, T, H, W, C) → 出力: (B, T)"""
+        """フォワードパス
+        
+        Args:
+            x: 入力テンソル (B, T, H, W, C)
+        
+        Returns:
+            出力テンソル (B, T)
+        """
         batch_size, time_frames = x.size(0), x.size(1)
         
+        # 時間軸をバッチ次元に展開
         x = x.view(batch_size * time_frames, x.size(2), x.size(3), x.size(4))
         x = x.permute(0, 3, 1, 2)  # (B*T, C, H, W)
         
+        # ConvBlock 1
         x = self.conv1_1(x)
         x = self.bn1_1(x)
         x = self.elu1_1(x)
@@ -1068,6 +1175,7 @@ class PhysNet2DCNN_2D(nn.Module):
         x = self.pool1(x)
         x = self.dropout(x)
         
+        # ConvBlock 2
         x = self.conv2_1(x)
         x = self.bn2_1(x)
         x = self.elu2_1(x)
@@ -1077,6 +1185,7 @@ class PhysNet2DCNN_2D(nn.Module):
         x = self.pool2(x)
         x = self.dropout(x)
         
+        # ConvBlock 3
         x = self.conv3_1(x)
         x = self.bn3_1(x)
         x = self.elu3_1(x)
@@ -1086,6 +1195,7 @@ class PhysNet2DCNN_2D(nn.Module):
         x = self.pool3(x)
         x = self.dropout(x)
         
+        # ConvBlock 4（大きい入力の場合のみ）
         if not self.small_input:
             x = self.conv4_1(x)
             x = self.bn4_1(x)
@@ -1096,6 +1206,7 @@ class PhysNet2DCNN_2D(nn.Module):
             x = self.pool4(x)
             x = self.dropout(x)
         
+        # ConvBlock 5
         x = self.conv5_1(x)
         x = self.bn5_1(x)
         x = self.elu5_1(x)
@@ -1103,10 +1214,12 @@ class PhysNet2DCNN_2D(nn.Module):
         x = self.bn5_2(x)
         x = self.elu5_2(x)
         
+        # 空間プーリング
         x = self.spatial_pool(x)
         x = x.view(batch_size, time_frames, 64)
         
-        x = x.permute(0, 2, 1)
+        # 時間処理
+        x = x.permute(0, 2, 1)  # (B, C, T)
         x = self.temporal_conv1(x)
         x = self.temporal_bn1(x)
         x = self.temporal_elu1(x)
@@ -1115,10 +1228,11 @@ class PhysNet2DCNN_2D(nn.Module):
         x = self.temporal_bn2(x)
         x = self.temporal_elu2(x)
         
-        x = x.permute(0, 2, 1)
+        x = x.permute(0, 2, 1)  # (B, T, C)
         
+        # 最終出力
         x = self.fc(x)
-        x = x.squeeze(-1)
+        x = x.squeeze(-1)  # (B, T)
         
         return x
 
@@ -1136,6 +1250,7 @@ def create_model(config):
     else:
         raise ValueError(f"Unknown model_type: {config.model_type}")
     
+    # torch.compileの適用（PyTorch 2.0以降）
     if config.use_compile and torch.__version__.startswith("2."):
         if config.verbose:
             print(f"  PyTorch 2.0+検出: torch.compileでモデルを最適化します")
@@ -1146,6 +1261,7 @@ def create_model(config):
                 print(f"  torch.compileに失敗しました: {e}")
                 print("  通常モードで続行します")
     
+    # モデル情報の表示
     if config.verbose and config.model_mode == 'within_subject':
         print(f"\n選択モデル: {model_name}")
         print(f"モード: {config.model_mode}")
@@ -1155,6 +1271,7 @@ def create_model(config):
         else:
             print(f"LABデータ: 未使用（RGB = {config.num_channels}チャンネル）")
         
+        print(f"信号正規化: {config.normalize_signal} (方法: {config.signal_normalization_method})")
         print(f"訓練:検証データ比率: {config.train_val_split_ratio*100:.0f}:{(1-config.train_val_split_ratio)*100:.0f}")
         print(f"検証データ分割戦略: {config.validation_split_strategy}")
         if config.validation_split_strategy == 'stratified':
@@ -1178,7 +1295,11 @@ def create_model(config):
         
         print(f"Warmup: {config.warmup_epochs}エポック (初期学習率×{config.warmup_lr_factor})")
         print(f"勾配クリッピング: {config.gradient_clip_val}")
-        print(f"パラメータ数: {sum(p.numel() for p in model.parameters()):,}")
+        
+        # パラメータ数の計算
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"パラメータ数: 総計{total_params:,} (訓練可能: {trainable_params:,})")
         
         if config.model_type == "3d":
             print("【注意】3Dモデルはメモリを多く使用します。バッチサイズの調整を推奨します。")
@@ -1188,119 +1309,17 @@ def create_model(config):
     return model
 
 # ================================
-# データ読み込み関数（複数指標対応）
+# データ読み込み関数（複数指標対応・信号正規化）
 # ================================
 def load_data_single_subject(subject, config):
-    """単一被験者のデータを読み込み（LABデータ対応、現在の指標用）"""
+    """単一被験者のデータを読み込み（LABデータ対応、現在の指標用、信号正規化付き）"""
     
     # RGBデータの読み込み
     rgb_path = os.path.join(config.rgb_base_path, subject, 
                             f"{subject}_downsampled_1Hz.npy")
     if not os.path.exists(rgb_path):
         print(f"警告: {subject}のRGBデータが見つかりません: {rgb_path}")
-        return None, None
-    
-    rgb_data = np.load(rgb_path)
-    
-    # データのリサイズ（14x16 → 36x36）
-    resized_rgb = np.zeros((rgb_data.shape[0], 36, 36, rgb_data.shape[-1]))
-    for i in range(rgb_data.shape[0]):
-        for c in range(rgb_data.shape[-1]):
-            resized_rgb[i, :, :, c] = cv2.resize(rgb_data[i, :, :, c], (36, 36))
-    rgb_data = resized_rgb
-    
-    # LABデータの読み込み（オプション）
-    if config.use_lab:
-        lab_path = os.path.join(config.rgb_base_path, subject, 
-                                f"{subject}_downsampled_1Hzver2.npy")
-        
-        if not os.path.exists(lab_path):
-            print(f"警告: {subject}のLABデータが見つかりません: {lab_path}")
-            print(f"  LABデータなしで処理を続行します。")
-            config.use_lab = False
-            config.use_channel = 'RGB'
-            config.num_channels = 3
-        else:
-            lab_data = np.load(lab_path)
-            # LABデータもリサイズ
-            resized_lab = np.zeros((lab_data.shape[0], 36, 36, lab_data.shape[-1]))
-            for i in range(lab_data.shape[0]):
-                for c in range(lab_data.shape[-1]):
-                    resized_lab[i, :, :, c] = cv2.resize(lab_data[i, :, :, c], (36, 36))
-            lab_data = resized_lab
-            
-            if rgb_data.shape == lab_data.shape:
-                combined_data = np.concatenate([rgb_data, lab_data], axis=-1)
-                
-                if lab_data.max() > 1.0:
-                    combined_data[..., 3:] = combined_data[..., 3:] / 255.0
-                
-                rgb_data = combined_data
-    
-    # 信号データの読み込み
-    signal_data_list = []
-    for task in config.tasks:
-        # Cross-Subjectモードでは現在の指標を使用
-        if config.model_mode == 'cross_subject':
-            signal_path = os.path.join(config.signal_base_path, subject, 
-                                      config.current_signal_type, 
-                                      f"{config.current_signal_prefix}_{task}.npy")
-        else:
-            # Within-Subjectモードでは従来通り
-            signal_path = os.path.join(config.signal_base_path, subject, 
-                                      config.signal_type, 
-                                      f"{config.signal_prefix}_{task}.npy")
-        
-        if not os.path.exists(signal_path):
-            if config.model_mode == 'cross_subject':
-                print(f"警告: {subject}の{task}の{config.current_signal_type}データが見つかりません")
-            else:
-                print(f"警告: {subject}の{task}の{config.signal_type}データが見つかりません")
-            return None, None
-        signal_data_list.append(np.load(signal_path))
-    
-    # ここで signal_data を定義（重要！）
-    signal_data = np.concatenate(signal_data_list)
-    
-    # 信号データの正規化（signal_dataが定義された後）
-    if config.signal_normalization != 'none':
-        if config.signal_norm_per_subject:
-            # 被験者ごとの正規化
-            signal_data, norm_params = normalize_signal(
-                signal_data, 
-                method=config.signal_normalization,
-                return_params=True
-            )
-            # 正規化パラメータを保存（推論時に必要）
-            config.norm_params[subject] = norm_params
-            
-            if config.verbose and config.model_mode == 'within_subject':
-                print(f"  {subject}の信号正規化 ({config.signal_normalization}):")
-                if config.signal_normalization == 'min-max':
-                    print(f"    元の範囲: [{norm_params['min']:.3f}, {norm_params['max']:.3f}]")
-                elif config.signal_normalization == 'z-score':
-                    print(f"    元の平均: {norm_params['mean']:.3f}, 標準偏差: {norm_params['std']:.3f}")
-                elif config.signal_normalization == 'robust':
-                    print(f"    元の中央値: {norm_params['median']:.3f}, IQR: {norm_params['iqr']:.3f}")
-    
-    # データの正規化（RGBは0-1の範囲に）
-    if rgb_data[..., :3].max() > 1.0:  # RGBチャンネルのみチェック
-        rgb_data[..., :3] = rgb_data[..., :3] / 255.0
-    
-    return rgb_data, signal_data
-
-# ================================
-# データ読み込み関数（複数指標対応）
-# ================================
-def load_data_single_subject(subject, config):
-    """単一被験者のデータを読み込み（LABデータ対応、現在の指標用）"""
-    
-    # すべてのモデルで同じRGBデータファイルを使用
-    rgb_path = os.path.join(config.rgb_base_path, subject, 
-                            f"{subject}_downsampled_1Hz.npy")
-    if not os.path.exists(rgb_path):
-        print(f"警告: {subject}のRGBデータが見つかりません: {rgb_path}")
-        return None, None
+        return None, None, None
     
     rgb_data = np.load(rgb_path)  # Shape: (360, 14, 16, 3)
     
@@ -1314,7 +1333,7 @@ def load_data_single_subject(subject, config):
     # LABデータの読み込み（オプション）
     if config.use_lab:
         lab_path = os.path.join(config.rgb_base_path, subject, 
-                                f"{subject}_downsampled_1Hzver2.npy")
+                                f"{subject}{config.lab_filename}")
         
         if not os.path.exists(lab_path):
             print(f"警告: {subject}のLABデータが見つかりません: {lab_path}")
@@ -1331,18 +1350,23 @@ def load_data_single_subject(subject, config):
                     resized_lab[i, :, :, c] = cv2.resize(lab_data[i, :, :, c], (36, 36))
             lab_data = resized_lab
             
+            # RGBとLABを結合
             if rgb_data.shape == lab_data.shape:
                 combined_data = np.concatenate([rgb_data, lab_data], axis=-1)
                 
+                # LABデータが255スケールの場合は正規化
                 if lab_data.max() > 1.0:
                     combined_data[..., 3:] = combined_data[..., 3:] / 255.0
                 
                 rgb_data = combined_data
+            else:
+                print(f"警告: RGBとLABのデータ形状が一致しません")
+                print(f"  RGB: {rgb_data.shape}, LAB: {lab_data.shape}")
     
     # 信号データの読み込み（現在の指標）
     signal_data_list = []
     for task in config.tasks:
-        # Cross-Subjectモードでは現在の指標を使用
+        # モードに応じて適切な信号タイプを使用
         if config.model_mode == 'cross_subject':
             signal_path = os.path.join(config.signal_base_path, subject, 
                                       config.current_signal_type, 
@@ -1358,58 +1382,67 @@ def load_data_single_subject(subject, config):
                 print(f"警告: {subject}の{task}の{config.current_signal_type}データが見つかりません")
             else:
                 print(f"警告: {subject}の{task}の{config.signal_type}データが見つかりません")
-            return None, None
+            return None, None, None
         signal_data_list.append(np.load(signal_path))
     
-    # ================================
-    # 信号データの正規化（ここに追加）
-    # ================================
-    if config.signal_normalization != 'none':
-        if config.signal_norm_per_subject:
-            # 被験者ごとの正規化
-            signal_data, norm_params = normalize_signal(
-                signal_data, 
-                method=config.signal_normalization,
-                return_params=True
-            )
-            # 正規化パラメータを保存（推論時に必要）
-            config.norm_params[subject] = norm_params
-            
-            if config.verbose and config.model_mode == 'within_subject':
-                print(f"  {subject}の信号正規化 ({config.signal_normalization}):")
-                if config.signal_normalization == 'min-max':
-                    print(f"    元の範囲: [{norm_params['min']:.3f}, {norm_params['max']:.3f}]")
-                elif config.signal_normalization == 'z-score':
-                    print(f"    元の平均: {norm_params['mean']:.3f}, 標準偏差: {norm_params['std']:.3f}")
-                elif config.signal_normalization == 'robust':
-                    print(f"    元の中央値: {norm_params['median']:.3f}, IQR: {norm_params['iqr']:.3f}")
-    
-    # データの正規化（RGBは0-1の範囲に）
-    if rgb_data[..., :3].max() > 1.0:  # RGBチャンネルのみチェック
-        rgb_data[..., :3] = rgb_data[..., :3] / 255.0
-    
-    return rgb_data, signal_data
+    signal_data = np.concatenate(signal_data_list)
     
     # データの正規化（0-1の範囲に）
     if rgb_data[..., :3].max() > 1.0:  # RGBチャンネルのみチェック
         rgb_data[..., :3] = rgb_data[..., :3] / 255.0
     
-    return rgb_data, signal_data
+    # 信号データの正規化
+    signal_normalizer = None
+    if config.normalize_signal:
+        signal_normalizer = SignalNormalizer(method=config.signal_normalization_method)
+        signal_data_normalized = signal_normalizer.fit_transform(signal_data)
+        
+        if config.verbose:
+            print(f"  信号正規化: 元の範囲[{signal_data.min():.3f}, {signal_data.max():.3f}] → "
+                  f"正規化後[{signal_data_normalized.min():.3f}, {signal_data_normalized.max():.3f}]")
+        
+        signal_data = signal_data_normalized
+    
+    return rgb_data, signal_data, signal_normalizer
 
 def load_all_subjects_data(config):
-    """全被験者のデータを読み込み（Cross-Subject用、現在の指標用）"""
+    """全被験者のデータを読み込み（Cross-Subject用、現在の指標用、信号正規化付き）"""
     all_rgb_data = []
     all_signal_data = []
     subject_task_info = []
     
     print(f"\n全被験者データ読み込み中（{config.current_signal_type}）...")
     
+    # 全被験者の信号データを収集（正規化用）
+    all_signals_for_normalization = []
+    
+    # まず全データを読み込んで信号データを収集
+    temp_data = []
     for subject in config.subjects:
-        rgb_data, signal_data = load_data_single_subject(subject, config)
+        rgb_data, signal_data, _ = load_data_single_subject(subject, config)
         
         if rgb_data is None or signal_data is None:
             print(f"  {subject}のデータ読み込み失敗。スキップします。")
             continue
+        
+        temp_data.append((subject, rgb_data, signal_data))
+        all_signals_for_normalization.extend(signal_data)
+    
+    # 全体の信号データで正規化器を学習
+    signal_normalizer = None
+    if config.normalize_signal and len(all_signals_for_normalization) > 0:
+        signal_normalizer = SignalNormalizer(method=config.signal_normalization_method)
+        signal_normalizer.fit(np.array(all_signals_for_normalization))
+        
+        if config.verbose:
+            print(f"  全体信号正規化: 元の範囲[{np.min(all_signals_for_normalization):.3f}, "
+                  f"{np.max(all_signals_for_normalization):.3f}]")
+    
+    # 正規化器を使ってデータを処理
+    for subject, rgb_data, signal_data in temp_data:
+        # 信号データを正規化
+        if signal_normalizer is not None:
+            signal_data = signal_normalizer.transform(signal_data)
         
         # タスクごとに分割（各タスク60フレーム）
         for task_idx, task in enumerate(config.tasks):
@@ -1434,12 +1467,15 @@ def load_all_subjects_data(config):
     print(f"  読み込み完了: {len(all_rgb_data)}タスク分のデータ")
     print(f"  データ形状: RGB={all_rgb_data.shape}, Signal={all_signal_data.shape}")
     
-    return all_rgb_data, all_signal_data, subject_task_info
+    if signal_normalizer is not None and config.verbose:
+        print(f"  正規化後信号範囲: [{all_signal_data.min():.3f}, {all_signal_data.max():.3f}]")
     
+    return all_rgb_data, all_signal_data, subject_task_info, signal_normalizer
+
 # ================================
 # 学習関数（AMP対応高速化版）
 # ================================
-def train_model(model, train_loader, val_loader, config, fold=None):
+def train_model(model, train_loader, val_loader, config, fold=None, signal_normalizer=None):
     """モデルの学習（AMP対応、高速化版）"""
     
     if config.verbose and fold is not None:
@@ -1455,6 +1491,7 @@ def train_model(model, train_loader, val_loader, config, fold=None):
     else:
         criterion = nn.MSELoss()
     
+    # オプティマイザ
     optimizer = optim.Adam(model.parameters(), lr=config.learning_rate, 
                           weight_decay=config.weight_decay)
     
@@ -1492,7 +1529,8 @@ def train_model(model, train_loader, val_loader, config, fold=None):
     train_preds_best = None
     train_targets_best = None
     
-    import time
+    train_losses = []
+    val_losses = []
     
     for epoch in range(config.epochs):
         epoch_start = time.time()
@@ -1509,10 +1547,12 @@ def train_model(model, train_loader, val_loader, config, fold=None):
         # 学習フェーズ
         model.train()
         train_loss = 0
+        train_mse_loss = 0
+        train_corr_loss = 0
         train_preds_all = []
         train_targets_all = []
         
-        for rgb, sig in train_loader:
+        for batch_idx, (rgb, sig) in enumerate(train_loader):
             rgb, sig = rgb.to(config.device), sig.to(config.device)
             
             optimizer.zero_grad()
@@ -1524,6 +1564,8 @@ def train_model(model, train_loader, val_loader, config, fold=None):
                         loss, mse_loss, corr_loss = criterion(pred, sig)
                     else:
                         loss = criterion(pred, sig)
+                        mse_loss = loss
+                        corr_loss = torch.tensor(0.0)
                 
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
@@ -1536,6 +1578,8 @@ def train_model(model, train_loader, val_loader, config, fold=None):
                     loss, mse_loss, corr_loss = criterion(pred, sig)
                 else:
                     loss = criterion(pred, sig)
+                    mse_loss = loss
+                    corr_loss = torch.tensor(0.0)
                 
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=config.gradient_clip_val)
@@ -1545,7 +1589,10 @@ def train_model(model, train_loader, val_loader, config, fold=None):
                 scheduler.step()
             
             train_loss += loss.item()
+            train_mse_loss += mse_loss.item()
+            train_corr_loss += corr_loss.item()
             
+            # 予測値と目標値を保存
             if pred.dim() == 2:
                 train_preds_all.append(pred.detach().cpu().numpy())
                 train_targets_all.append(sig.detach().cpu().numpy())
@@ -1556,6 +1603,10 @@ def train_model(model, train_loader, val_loader, config, fold=None):
         # 検証フェーズ
         model.eval()
         val_loss = 0
+        val_mse_loss = 0
+        val_corr_loss = 0
+        val_preds_all = []
+        val_targets_all = []
         
         with torch.no_grad():
             for rgb, sig in val_loader:
@@ -1568,18 +1619,40 @@ def train_model(model, train_loader, val_loader, config, fold=None):
                             loss, mse_loss, corr_loss = criterion(pred, sig)
                         else:
                             loss = criterion(pred, sig)
+                            mse_loss = loss
+                            corr_loss = torch.tensor(0.0)
                 else:
                     pred = model(rgb)
                     if hasattr(criterion, 'alpha'):
                         loss, mse_loss, corr_loss = criterion(pred, sig)
                     else:
                         loss = criterion(pred, sig)
+                        mse_loss = loss
+                        corr_loss = torch.tensor(0.0)
                 
                 val_loss += loss.item()
+                val_mse_loss += mse_loss.item()
+                val_corr_loss += corr_loss.item()
+                
+                if pred.dim() == 2:
+                    val_preds_all.append(pred.cpu().numpy())
+                    val_targets_all.append(sig.cpu().numpy())
+                else:
+                    val_preds_all.extend(pred.cpu().numpy())
+                    val_targets_all.extend(sig.cpu().numpy())
         
+        # 平均損失の計算
         train_loss /= len(train_loader)
+        train_mse_loss /= len(train_loader)
+        train_corr_loss /= len(train_loader)
         val_loss /= len(val_loader)
+        val_mse_loss /= len(val_loader)
+        val_corr_loss /= len(val_loader)
         
+        train_losses.append(train_loss)
+        val_losses.append(val_loss)
+        
+        # スケジューラー更新
         if not scheduler_per_batch and epoch >= config.warmup_epochs:
             if config.scheduler_type == "plateau":
                 scheduler.step(val_loss)
@@ -1592,6 +1665,7 @@ def train_model(model, train_loader, val_loader, config, fold=None):
             best_val_loss = val_loss
             patience_counter = 0
             
+            # 最良の訓練予測を保存
             if isinstance(train_preds_all[0], np.ndarray) and train_preds_all[0].ndim > 0:
                 train_preds_best = np.concatenate(train_preds_all, axis=0)
                 train_targets_best = np.concatenate(train_targets_all, axis=0)
@@ -1614,16 +1688,23 @@ def train_model(model, train_loader, val_loader, config, fold=None):
                 'model_type': config.model_type,
                 'signal_type': config.current_signal_type if config.model_mode == 'cross_subject' else config.signal_type
             }, save_dir / model_name)
+            
+            # 信号正規化器も保存
+            if signal_normalizer is not None:
+                normalizer_path = save_dir / f'signal_normalizer_fold{fold+1}.pkl'
+                signal_normalizer.save(normalizer_path)
         else:
             patience_counter += 1
         
         epoch_time = time.time() - epoch_start
         
+        # 進捗表示
         if config.verbose and ((epoch + 1) % 20 == 0 or epoch == 0):
             print(f"    Epoch [{epoch+1:3d}/{config.epochs}] "
-                  f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, "
-                  f"Time: {epoch_time:.1f}s")
+                  f"Train Loss: {train_loss:.4f} (MSE: {train_mse_loss:.4f}, Corr: {train_corr_loss:.4f}), "
+                  f"Val Loss: {val_loss:.4f}, Time: {epoch_time:.1f}s")
         
+        # Early Stopping
         if patience_counter >= config.patience:
             if config.verbose:
                 print(f"    Early stopping at epoch {epoch+1}")
@@ -1633,12 +1714,12 @@ def train_model(model, train_loader, val_loader, config, fold=None):
     checkpoint = torch.load(save_dir / model_name)
     model.load_state_dict(checkpoint['model_state_dict'])
     
-    return model, train_preds_best, train_targets_best
+    return model, train_preds_best, train_targets_best, train_losses, val_losses
 
 # ================================
 # 評価関数
 # ================================
-def evaluate_model(model, test_loader, config):
+def evaluate_model(model, test_loader, config, signal_normalizer=None):
     """モデルの評価（AMP対応）"""
     model.eval()
     predictions = []
@@ -1657,17 +1738,32 @@ def evaluate_model(model, test_loader, config):
             predictions.append(pred.cpu().numpy())
             targets.append(sig.cpu().numpy())
     
+    # 予測値と目標値を結合
     predictions = np.concatenate(predictions, axis=0)
     targets = np.concatenate(targets, axis=0)
     
-    mae = mean_absolute_error(targets.flatten(), predictions.flatten())
-    rmse = np.sqrt(np.mean((targets.flatten() - predictions.flatten()) ** 2))
-    corr, p_value = pearsonr(targets.flatten(), predictions.flatten())
+    # 逆正規化（必要な場合）
+    predictions_original = predictions.copy()
+    targets_original = targets.copy()
+    
+    if signal_normalizer is not None and config.normalize_signal:
+        # 評価は正規化前のスケールで行う
+        predictions_original = signal_normalizer.inverse_transform(predictions.flatten()).reshape(predictions.shape)
+        targets_original = signal_normalizer.inverse_transform(targets.flatten()).reshape(targets.shape)
+    
+    # メトリクス計算（元のスケール）
+    mae = mean_absolute_error(targets_original.flatten(), predictions_original.flatten())
+    rmse = np.sqrt(np.mean((targets_original.flatten() - predictions_original.flatten()) ** 2))
+    corr, p_value = pearsonr(targets_original.flatten(), predictions_original.flatten())
     
     # R-squared
-    ss_res = np.sum((targets.flatten() - predictions.flatten()) ** 2)
-    ss_tot = np.sum((targets.flatten() - np.mean(targets.flatten())) ** 2)
+    ss_res = np.sum((targets_original.flatten() - predictions_original.flatten()) ** 2)
+    ss_tot = np.sum((targets_original.flatten() - np.mean(targets_original.flatten())) ** 2)
     r2 = 1 - (ss_res / ss_tot)
+    
+    # 正規化されたスケールでのメトリクスも計算
+    mae_normalized = mean_absolute_error(targets.flatten(), predictions.flatten())
+    corr_normalized, _ = pearsonr(targets.flatten(), predictions.flatten())
     
     return {
         'mae': mae,
@@ -1675,8 +1771,12 @@ def evaluate_model(model, test_loader, config):
         'corr': corr,
         'r2': r2,
         'p_value': p_value,
-        'predictions': predictions,
-        'targets': targets
+        'predictions': predictions_original,
+        'targets': targets_original,
+        'predictions_normalized': predictions,
+        'targets_normalized': targets,
+        'mae_normalized': mae_normalized,
+        'corr_normalized': corr_normalized
     }
 
 # ================================
@@ -1691,6 +1791,20 @@ def task_cross_validation(rgb_data, signal_data, config, subject, save_dir):
     all_test_targets = []
     all_test_tasks = []
     
+    # 信号正規化器（全データで学習）
+    signal_normalizer = None
+    if config.normalize_signal:
+        signal_normalizer = SignalNormalizer(method=config.signal_normalization_method)
+        signal_normalizer.fit(signal_data)
+        print(f"    信号正規化: 全体データで学習完了")
+        print(f"      元の範囲: [{signal_data.min():.3f}, {signal_data.max():.3f}]")
+        
+        # 全体データを正規化
+        signal_data_normalized = signal_normalizer.transform(signal_data)
+        print(f"      正規化後: [{signal_data_normalized.min():.3f}, {signal_data_normalized.max():.3f}]")
+    else:
+        signal_data_normalized = signal_data
+    
     for test_task_idx, test_task in enumerate(config.tasks):
         print(f"    Fold {test_task_idx+1}/{n_tasks}: テスト={test_task}")
         
@@ -1703,13 +1817,18 @@ def task_cross_validation(rgb_data, signal_data, config, subject, save_dir):
         test_end = (test_task_idx + 1) * config.task_duration
         
         test_rgb = rgb_data[test_start:test_end]
-        test_signal = signal_data[test_start:test_end]
+        test_signal = signal_data_normalized[test_start:test_end]
+        test_signal_original = signal_data[test_start:test_end]
         
         train_rgb = np.concatenate([
             rgb_data[:test_start],
             rgb_data[test_end:]
         ])
         train_signal = np.concatenate([
+            signal_data_normalized[:test_start],
+            signal_data_normalized[test_end:]
+        ])
+        train_signal_original = np.concatenate([
             signal_data[:test_start],
             signal_data[test_end:]
         ])
@@ -1718,13 +1837,22 @@ def task_cross_validation(rgb_data, signal_data, config, subject, save_dir):
         
         # 訓練データから検証データを分離
         if config.validation_split_strategy == 'stratified':
-            train_rgb, train_signal, val_rgb, val_signal = stratified_sampling_split(
-                train_rgb, train_signal,
+            # 層化サンプリングは元のスケールで実施
+            train_rgb, train_signal_original, val_rgb, val_signal_original = stratified_sampling_split(
+                train_rgb, train_signal_original,
                 val_ratio=(1 - config.train_val_split_ratio),
                 n_strata=config.n_strata,
                 method=config.stratification_method
             )
+            # 正規化版も同じインデックスで分割
+            if config.normalize_signal:
+                train_signal = signal_normalizer.transform(train_signal_original)
+                val_signal = signal_normalizer.transform(val_signal_original)
+            else:
+                train_signal = train_signal_original
+                val_signal = val_signal_original
         else:
+            # 通常の分割
             val_size = int(len(train_rgb) * (1 - config.train_val_split_ratio))
             val_indices = np.random.choice(len(train_rgb), val_size, replace=False)
             train_indices = np.setdiff1d(np.arange(len(train_rgb)), val_indices)
@@ -1740,11 +1868,14 @@ def task_cross_validation(rgb_data, signal_data, config, subject, save_dir):
         seed_worker = set_all_seeds(config.random_seed)
         
         train_dataset = CODataset(train_rgb[np.newaxis, ...], train_signal, 
-                                 config.model_type, config.use_channel, config, is_training=True)
+                                 config.model_type, config.use_channel, config, is_training=True,
+                                 signal_normalizer=None)  # 既に正規化済み
         val_dataset = CODataset(val_rgb[np.newaxis, ...], val_signal, 
-                               config.model_type, config.use_channel, config, is_training=False)
+                               config.model_type, config.use_channel, config, is_training=False,
+                               signal_normalizer=None)
         test_dataset = CODataset(test_rgb[np.newaxis, ...], test_signal, 
-                                config.model_type, config.use_channel, config, is_training=False)
+                                config.model_type, config.use_channel, config, is_training=False,
+                                signal_normalizer=None)
         
         train_loader = DataLoader(
             train_dataset, batch_size=1, shuffle=True,
@@ -1764,11 +1895,13 @@ def task_cross_validation(rgb_data, signal_data, config, subject, save_dir):
         
         # モデル作成・学習
         model = create_model(config)
-        model, train_preds, train_targets = train_model(model, train_loader, val_loader, config, fold=test_task_idx)
+        model, train_preds, train_targets, train_losses, val_losses = train_model(
+            model, train_loader, val_loader, config, fold=test_task_idx, signal_normalizer=signal_normalizer
+        )
         
         # 評価
-        train_results = evaluate_model(model, train_loader, config)
-        test_results = evaluate_model(model, test_loader, config)
+        train_results = evaluate_model(model, train_loader, config, signal_normalizer=signal_normalizer)
+        test_results = evaluate_model(model, test_loader, config, signal_normalizer=signal_normalizer)
         
         print(f"      訓練結果 - MAE: {train_results['mae']:.4f}, RMSE: {train_results['rmse']:.4f}, " +
               f"Corr: {train_results['corr']:.4f}, R²: {train_results['r2']:.4f}")
@@ -1786,13 +1919,19 @@ def task_cross_validation(rgb_data, signal_data, config, subject, save_dir):
             'test_mae': test_results['mae'],
             'test_rmse': test_results['rmse'],
             'test_corr': test_results['corr'],
-            'test_r2': test_results['r2']
+            'test_r2': test_results['r2'],
+            'train_predictions': train_results['predictions'],
+            'train_targets': train_results['targets'],
+            'train_losses': train_losses,
+            'val_losses': val_losses
         })
         
+        # テスト結果を蓄積
         all_test_predictions.extend(test_results['predictions'].flatten())
         all_test_targets.extend(test_results['targets'].flatten())
         all_test_tasks.extend([test_task] * len(test_results['predictions'].flatten()))
         
+        # メモリ解放
         torch.cuda.empty_cache()
     
     all_test_predictions = np.array(all_test_predictions)
@@ -1815,10 +1954,11 @@ def cross_subject_cv_single_signal(config):
     print(f"指標: {signal_type} の5分割交差検証開始")
     print(f"{'='*60}")
     
-    # 全データ読み込み
-    all_rgb_data, all_signal_data, subject_task_info = load_all_subjects_data(config)
+    # 全データ読み込み（信号正規化付き）
+    all_rgb_data, all_signal_data, subject_task_info, signal_normalizer = load_all_subjects_data(config)
     
     n_samples = len(all_rgb_data)
+    print(f"総サンプル数: {n_samples}")
     
     # 完全ランダムシャッフル
     np.random.seed(config.random_seed)
@@ -1838,6 +1978,8 @@ def cross_subject_cv_single_signal(config):
     
     # 各foldに各被験者のデータが最低1つ含まれるように調整
     if config.ensure_subject_in_each_fold:
+        print("\n各foldに各被験者のデータが含まれるよう調整中...")
+        
         for fold_idx in range(config.n_folds):
             current_fold = fold_indices[fold_idx]
             subjects_in_fold = set()
@@ -1847,7 +1989,11 @@ def cross_subject_cv_single_signal(config):
             missing_subjects = set(config.subjects) - subjects_in_fold
             
             if missing_subjects:
+                print(f"  Fold {fold_idx + 1}: {len(missing_subjects)}人の被験者データが不足")
+                
                 for missing_subject in missing_subjects:
+                    # 他のfoldからデータを移動
+                    moved = False
                     for other_fold_idx in range(config.n_folds):
                         if other_fold_idx == fold_idx:
                             continue
@@ -1862,8 +2008,14 @@ def cross_subject_cv_single_signal(config):
                             idx_to_move = np.random.choice(subject_indices_in_other)
                             fold_indices[other_fold_idx].remove(idx_to_move)
                             fold_indices[fold_idx].append(idx_to_move)
+                            print(f"    {missing_subject}のデータをFold {other_fold_idx + 1}から移動")
+                            moved = True
                             break
+                    
+                    if not moved:
+                        print(f"    警告: {missing_subject}のデータを移動できませんでした")
     
+    # numpy配列に変換
     for i in range(config.n_folds):
         fold_indices[i] = np.array(fold_indices[i])
     
@@ -1875,10 +2027,16 @@ def cross_subject_cv_single_signal(config):
         f.write(f"="*60 + "\n\n")
         f.write(f"総サンプル数: {n_samples}\n")
         f.write(f"被験者数: {len(config.subjects)}\n")
-        f.write(f"タスク数/被験者: {len(config.tasks)}\n\n")
+        f.write(f"タスク数/被験者: {len(config.tasks)}\n")
+        f.write(f"データ分割方法: 完全ランダムシャッフル後5分割\n")
+        f.write(f"各foldに各被験者のデータを含める: {config.ensure_subject_in_each_fold}\n")
+        f.write(f"信号正規化: {config.normalize_signal} (方法: {config.signal_normalization_method})\n\n")
         
         for fold_idx, test_idx in enumerate(fold_indices):
-            f.write(f"Fold {fold_idx + 1}: {len(test_idx)}サンプル\n")
+            f.write(f"Fold {fold_idx + 1}:\n")
+            f.write(f"  テストサンプル数: {len(test_idx)}\n")
+            
+            # テストデータに含まれる被験者と各被験者のタスク数を確認
             test_subjects = {}
             for idx in test_idx:
                 subj = subject_task_info[idx]['subject']
@@ -1886,24 +2044,68 @@ def cross_subject_cv_single_signal(config):
                 if subj not in test_subjects:
                     test_subjects[subj] = []
                 test_subjects[subj].append(task)
-            f.write(f"  被験者数: {len(test_subjects)}\n")
+            
+            f.write(f"  テストデータ被験者数: {len(test_subjects)}\n")
+            
+            # 被験者ごとのタスク数の統計
+            task_counts = [len(tasks) for tasks in test_subjects.values()]
+            if len(task_counts) > 0:
+                f.write(f"  被験者ごとのタスク数: 最小={min(task_counts)}, 最大={max(task_counts)}, "
+                       f"平均={np.mean(task_counts):.1f}\n")
+            
+            # 詳細（被験者名とタスク）
             f.write(f"  被験者ごとの詳細:\n")
             for subj in sorted(test_subjects.keys()):
                 tasks = test_subjects[subj]
                 f.write(f"    {subj}: {len(tasks)}タスク ({', '.join(sorted(tasks))})\n")
             f.write("\n")
     
+    print(f"\nデータ分割情報を保存: {split_info_file}")
+    
+    # 分割の統計情報を表示
+    print("\n【分割統計】")
+    for fold_idx, test_idx in enumerate(fold_indices):
+        test_subjects = {}
+        for idx in test_idx:
+            subj = subject_task_info[idx]['subject']
+            if subj not in test_subjects:
+                test_subjects[subj] = 0
+            test_subjects[subj] += 1
+        
+        print(f"Fold {fold_idx + 1}: {len(test_idx)}サンプル, {len(test_subjects)}人の被験者")
+        
+        # 被験者が不足していないか確認
+        if len(test_subjects) < len(config.subjects):
+            missing = set(config.subjects) - set(test_subjects.keys())
+            if len(missing) > 0:
+                print(f"  警告: 以下の被験者のデータが含まれていません: {missing}")
+    
+    # 正規化器を保存
+    if signal_normalizer is not None:
+        normalizer_path = signal_dir / 'signal_normalizer.pkl'
+        signal_normalizer.save(normalizer_path)
+        print(f"\n信号正規化器を保存: {normalizer_path}")
+    
     # 交差検証実行
     fold_results = []
     
     for fold_idx in range(config.n_folds):
-        print(f"\nFold {fold_idx + 1}/{config.n_folds}")
+        print(f"\n{'='*60}")
+        print(f"Fold {fold_idx + 1}/{config.n_folds}")
+        print(f"{'='*60}")
         
+        # フォルダ作成
         fold_dir = signal_dir / f'fold{fold_idx + 1}'
         fold_dir.mkdir(parents=True, exist_ok=True)
         
+        # テストインデックス
         test_idx = fold_indices[fold_idx]
+        
+        # 訓練インデックス（他の全fold）
         train_idx = np.concatenate([fold_indices[i] for i in range(config.n_folds) if i != fold_idx])
+        
+        print(f"  テストサンプル数: {len(test_idx)}")
+        print(f"  訓練サンプル数: {len(train_idx)}")
         
         # データ分割
         train_rgb = all_rgb_data[train_idx]
@@ -1911,7 +2113,7 @@ def cross_subject_cv_single_signal(config):
         test_rgb = all_rgb_data[test_idx]
         test_signal = all_signal_data[test_idx]
         
-        # 検証データ分離
+        # 検証データ分離（10%）
         val_size = int(len(train_rgb) * 0.1)
         val_indices = np.random.choice(len(train_rgb), val_size, replace=False)
         train_indices = np.setdiff1d(np.arange(len(train_rgb)), val_indices)
@@ -1921,55 +2123,74 @@ def cross_subject_cv_single_signal(config):
         train_rgb = train_rgb[train_indices]
         train_signal = train_signal[train_indices]
         
-        print(f"  訓練: {len(train_rgb)}, 検証: {len(val_rgb)}, テスト: {len(test_rgb)}")
+        print(f"  最終データサイズ:")
+        print(f"    訓練: {len(train_rgb)}")
+        print(f"    検証: {len(val_rgb)}")
+        print(f"    テスト: {len(test_rgb)}")
         
         # データローダー作成
         seed_worker = set_all_seeds(config.random_seed)
         
         train_dataset = CODataset(train_rgb, train_signal, config.model_type, 
-                                 config.use_channel, config, is_training=True)
+                                 config.use_channel, config, is_training=True,
+                                 signal_normalizer=None)  # 既に正規化済み
         val_dataset = CODataset(val_rgb, val_signal, config.model_type, 
-                               config.use_channel, config, is_training=False)
+                               config.use_channel, config, is_training=False,
+                               signal_normalizer=None)
         test_dataset = CODataset(test_rgb, test_signal, config.model_type, 
-                                config.use_channel, config, is_training=False)
+                                config.use_channel, config, is_training=False,
+                                signal_normalizer=None)
         
         train_loader = DataLoader(
             train_dataset, batch_size=config.batch_size, shuffle=True,
             num_workers=config.num_workers, pin_memory=config.pin_memory,
-            worker_init_fn=seed_worker
+            worker_init_fn=seed_worker,
+            persistent_workers=(config.persistent_workers and config.num_workers > 0)
         )
         val_loader = DataLoader(
             val_dataset, batch_size=config.batch_size, shuffle=False,
             num_workers=config.num_workers, pin_memory=config.pin_memory,
-            worker_init_fn=seed_worker
+            worker_init_fn=seed_worker,
+            persistent_workers=(config.persistent_workers and config.num_workers > 0)
         )
         test_loader = DataLoader(
             test_dataset, batch_size=config.batch_size, shuffle=False,
             num_workers=config.num_workers, pin_memory=config.pin_memory,
-            worker_init_fn=seed_worker
+            worker_init_fn=seed_worker,
+            persistent_workers=(config.persistent_workers and config.num_workers > 0)
         )
         
         # モデル作成・学習
         model = create_model(config)
-        model, train_preds, train_targets = train_model(model, train_loader, val_loader, config, fold=fold_idx)
+        model, train_preds, train_targets, train_losses, val_losses = train_model(
+            model, train_loader, val_loader, config, fold=fold_idx, signal_normalizer=signal_normalizer
+        )
         
         # 評価
-        train_results = evaluate_model(model, train_loader, config)
-        test_results = evaluate_model(model, test_loader, config)
+        train_results = evaluate_model(model, train_loader, config, signal_normalizer=signal_normalizer)
+        test_results = evaluate_model(model, test_loader, config, signal_normalizer=signal_normalizer)
         
-        print(f"  結果 - 訓練MAE: {train_results['mae']:.4f}, Corr: {train_results['corr']:.4f}")
-        print(f"        テストMAE: {test_results['mae']:.4f}, Corr: {test_results['corr']:.4f}")
+        print(f"\n  Fold {fold_idx + 1} 結果:")
+        print(f"    訓練 - MAE: {train_results['mae']:.4f}, Corr: {train_results['corr']:.4f}")
+        print(f"    テスト - MAE: {test_results['mae']:.4f}, Corr: {test_results['corr']:.4f}")
         
+        # 結果を保存
         fold_results.append({
             'fold': fold_idx + 1,
             'train_mae': train_results['mae'],
+            'train_rmse': train_results['rmse'],
             'train_corr': train_results['corr'],
+            'train_r2': train_results['r2'],
             'test_mae': test_results['mae'],
+            'test_rmse': test_results['rmse'],
             'test_corr': test_results['corr'],
+            'test_r2': test_results['r2'],
             'train_predictions': train_results['predictions'],
             'train_targets': train_results['targets'],
             'test_predictions': test_results['predictions'],
-            'test_targets': test_results['targets']
+            'test_targets': test_results['targets'],
+            'train_losses': train_losses,
+            'val_losses': val_losses
         })
         
         # プロット（被験者ごとに色分け）
@@ -1978,6 +2199,10 @@ def cross_subject_cv_single_signal(config):
             subject_task_info, train_idx, test_idx
         )
         
+        # 学習曲線のプロット
+        plot_learning_curves(train_losses, val_losses, fold_dir, fold_idx + 1)
+        
+        # メモリ解放
         torch.cuda.empty_cache()
     
     # 全Fold統合プロット
@@ -1985,46 +2210,77 @@ def cross_subject_cv_single_signal(config):
     
     # 結果サマリー
     avg_train_mae = np.mean([r['train_mae'] for r in fold_results])
+    avg_train_rmse = np.mean([r['train_rmse'] for r in fold_results])
     avg_train_corr = np.mean([r['train_corr'] for r in fold_results])
-    avg_test_mae = np.mean([r['test_mae'] for r in fold_results])
-    avg_test_corr = np.mean([r['test_corr'] for r in fold_results])
-    std_test_mae = np.std([r['test_mae'] for r in fold_results])
-    std_test_corr = np.std([r['test_corr'] for r in fold_results])
+    avg_train_r2 = np.mean([r['train_r2'] for r in fold_results])
     
-    print(f"\n{signal_type} 最終結果:")
-    print(f"  訓練平均: MAE={avg_train_mae:.4f}, Corr={avg_train_corr:.4f}")
-    print(f"  テスト平均: MAE={avg_test_mae:.4f}±{std_test_mae:.4f}, Corr={avg_test_corr:.4f}±{std_test_corr:.4f}")
+    avg_test_mae = np.mean([r['test_mae'] for r in fold_results])
+    avg_test_rmse = np.mean([r['test_rmse'] for r in fold_results])
+    avg_test_corr = np.mean([r['test_corr'] for r in fold_results])
+    avg_test_r2 = np.mean([r['test_r2'] for r in fold_results])
+    
+    std_test_mae = np.std([r['test_mae'] for r in fold_results])
+    std_test_rmse = np.std([r['test_rmse'] for r in fold_results])
+    std_test_corr = np.std([r['test_corr'] for r in fold_results])
+    std_test_r2 = np.std([r['test_r2'] for r in fold_results])
+    
+    print(f"\n{'='*60}")
+    print(f"{signal_type} 最終結果:")
+    print(f"{'='*60}")
+    print(f"訓練平均:")
+    print(f"  MAE: {avg_train_mae:.4f}, RMSE: {avg_train_rmse:.4f}")
+    print(f"  Corr: {avg_train_corr:.4f}, R²: {avg_train_r2:.4f}")
+    print(f"テスト平均:")
+    print(f"  MAE: {avg_test_mae:.4f}±{std_test_mae:.4f}")
+    print(f"  RMSE: {avg_test_rmse:.4f}±{std_test_rmse:.4f}")
+    print(f"  Corr: {avg_test_corr:.4f}±{std_test_corr:.4f}")
+    print(f"  R²: {avg_test_r2:.4f}±{std_test_r2:.4f}")
     
     # 結果をCSVに保存
     results_df = pd.DataFrame([{
         'Signal': signal_type,
         'Fold': r['fold'],
         'Train_MAE': r['train_mae'],
+        'Train_RMSE': r['train_rmse'],
         'Train_Corr': r['train_corr'],
+        'Train_R2': r['train_r2'],
         'Test_MAE': r['test_mae'],
-        'Test_Corr': r['test_corr']
+        'Test_RMSE': r['test_rmse'],
+        'Test_Corr': r['test_corr'],
+        'Test_R2': r['test_r2']
     } for r in fold_results])
     
+    # 平均行を追加
     mean_row = pd.DataFrame({
         'Signal': [signal_type],
         'Fold': ['Mean'],
         'Train_MAE': [avg_train_mae],
+        'Train_RMSE': [avg_train_rmse],
         'Train_Corr': [avg_train_corr],
+        'Train_R2': [avg_train_r2],
         'Test_MAE': [avg_test_mae],
-        'Test_Corr': [avg_test_corr]
+        'Test_RMSE': [avg_test_rmse],
+        'Test_Corr': [avg_test_corr],
+        'Test_R2': [avg_test_r2]
     })
     
+    # 標準偏差行を追加
     std_row = pd.DataFrame({
         'Signal': [signal_type],
         'Fold': ['Std'],
         'Train_MAE': [np.std([r['train_mae'] for r in fold_results])],
+        'Train_RMSE': [np.std([r['train_rmse'] for r in fold_results])],
         'Train_Corr': [np.std([r['train_corr'] for r in fold_results])],
+        'Train_R2': [np.std([r['train_r2'] for r in fold_results])],
         'Test_MAE': [std_test_mae],
-        'Test_Corr': [std_test_corr]
+        'Test_RMSE': [std_test_rmse],
+        'Test_Corr': [std_test_corr],
+        'Test_R2': [std_test_r2]
     })
     
     results_df = pd.concat([results_df, mean_row, std_row], ignore_index=True)
     results_df.to_csv(signal_dir / 'cross_validation_results.csv', index=False)
+    print(f"\n結果をCSVに保存: {signal_dir / 'cross_validation_results.csv'}")
     
     return {
         'signal_type': signal_type,
@@ -2035,10 +2291,36 @@ def cross_subject_cv_single_signal(config):
         'std_test_mae': std_test_mae,
         'std_test_corr': std_test_corr
     }
-
 # ================================
 # プロット関数
 # ================================
+def plot_learning_curves(train_losses, val_losses, save_dir, fold):
+    """学習曲線のプロット"""
+    plt.figure(figsize=(10, 6))
+    
+    epochs = range(1, len(train_losses) + 1)
+    plt.plot(epochs, train_losses, 'b-', label='訓練損失', linewidth=2)
+    plt.plot(epochs, val_losses, 'r-', label='検証損失', linewidth=2)
+    
+    plt.xlabel('エポック')
+    plt.ylabel('損失')
+    plt.title(f'Fold {fold} - 学習曲線')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    # 最小検証損失の位置にマーカー
+    min_val_loss_epoch = np.argmin(val_losses) + 1
+    min_val_loss = np.min(val_losses)
+    plt.scatter([min_val_loss_epoch], [min_val_loss], color='red', s=100, zorder=5)
+    plt.annotate(f'最小検証損失\nEpoch {min_val_loss_epoch}\nLoss: {min_val_loss:.4f}',
+                xy=(min_val_loss_epoch, min_val_loss),
+                xytext=(min_val_loss_epoch + 5, min_val_loss + 0.01),
+                arrowprops=dict(arrowstyle='->', color='red', alpha=0.7))
+    
+    plt.tight_layout()
+    plt.savefig(save_dir / f'learning_curve_fold{fold}.png', dpi=150, bbox_inches='tight')
+    plt.close()
+
 def plot_fold_results_cross_subject(result, fold_dir, config, subject_task_info, train_idx, test_idx):
     """各Foldの結果をプロット（被験者ごとに色分け）"""
     fold = result['fold']
@@ -2061,15 +2343,17 @@ def plot_fold_results_cross_subject(result, fold_dir, config, subject_task_info,
                        alpha=0.3, s=5, color=config.subject_colors[subject],
                        label=subject)
     
+    # 対角線
     all_vals = np.concatenate([result['train_predictions'].flatten(), 
                               result['train_targets'].flatten()])
     min_val = all_vals.min()
     max_val = all_vals.max()
-    plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2)
+    plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2, label='理想線')
     
     plt.xlabel('真値')
     plt.ylabel('予測値')
-    plt.title(f"{config.current_signal_type} - Fold {fold} 訓練データ - MAE: {result['train_mae']:.3f}, Corr: {result['train_corr']:.3f}")
+    plt.title(f"{config.current_signal_type} - Fold {fold} 訓練データ - "
+              f"MAE: {result['train_mae']:.3f}, Corr: {result['train_corr']:.3f}")
     plt.grid(True, alpha=0.3)
     plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', ncol=2, fontsize=6)
     plt.tight_layout()
@@ -2094,15 +2378,17 @@ def plot_fold_results_cross_subject(result, fold_dir, config, subject_task_info,
                        alpha=0.4, s=8, color=config.subject_colors[subject],
                        label=f"{subject} ({len(subject_indices)})")
     
+    # 対角線
     all_vals = np.concatenate([result['test_predictions'].flatten(), 
                               result['test_targets'].flatten()])
     min_val = all_vals.min()
     max_val = all_vals.max()
-    plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2)
+    plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2, label='理想線')
     
     plt.xlabel('真値')
     plt.ylabel('予測値')
-    plt.title(f"{config.current_signal_type} - Fold {fold} テストデータ - MAE: {result['test_mae']:.3f}, Corr: {result['test_corr']:.3f}")
+    plt.title(f"{config.current_signal_type} - Fold {fold} テストデータ - "
+              f"MAE: {result['test_mae']:.3f}, Corr: {result['test_corr']:.3f}")
     plt.grid(True, alpha=0.3)
     plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', ncol=2, fontsize=6)
     plt.tight_layout()
@@ -2115,6 +2401,7 @@ def plot_all_folds_summary(fold_results, save_dir, config, subject_task_info, al
     # 訓練データ統合プロット
     plt.figure(figsize=(16, 12))
     
+    # 全Foldの訓練データをプロット
     for fold_idx, result in enumerate(fold_results):
         test_idx = all_fold_indices[fold_idx]
         train_idx = np.concatenate([all_fold_indices[i] for i in range(len(all_fold_indices)) if i != fold_idx])
@@ -2129,6 +2416,7 @@ def plot_all_folds_summary(fold_results, save_dir, config, subject_task_info, al
                 subject_preds = result['train_predictions'][subject_indices].flatten()
                 subject_targets = result['train_targets'][subject_indices].flatten()
                 
+                # 最初のfoldのみラベル付き（重複を避けるため）
                 if subject not in plotted_subjects and fold_idx == 0:
                     plt.scatter(subject_targets, subject_preds, 
                                alpha=0.2, s=3, color=config.subject_colors[subject],
@@ -2138,6 +2426,7 @@ def plot_all_folds_summary(fold_results, save_dir, config, subject_task_info, al
                     plt.scatter(subject_targets, subject_preds, 
                                alpha=0.2, s=3, color=config.subject_colors[subject])
     
+    # 対角線
     all_train_targets = np.concatenate([r['train_targets'].flatten() for r in fold_results])
     all_train_preds = np.concatenate([r['train_predictions'].flatten() for r in fold_results])
     min_val = min(all_train_targets.min(), all_train_preds.min())
@@ -2149,7 +2438,8 @@ def plot_all_folds_summary(fold_results, save_dir, config, subject_task_info, al
     
     avg_train_mae = np.mean([r['train_mae'] for r in fold_results])
     avg_train_corr = np.mean([r['train_corr'] for r in fold_results])
-    plt.title(f'{config.current_signal_type} - 全Fold 訓練データ - 平均MAE: {avg_train_mae:.3f}, 平均Corr: {avg_train_corr:.3f}')
+    plt.title(f'{config.current_signal_type} - 全Fold 訓練データ（被験者別） - '
+              f'平均MAE: {avg_train_mae:.3f}, 平均Corr: {avg_train_corr:.3f}')
     
     plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', ncol=3, fontsize=5)
     plt.grid(True, alpha=0.3)
@@ -2182,6 +2472,7 @@ def plot_all_folds_summary(fold_results, save_dir, config, subject_task_info, al
                     plt.scatter(subject_targets, subject_preds, 
                                alpha=0.3, s=5, color=config.subject_colors[subject])
     
+    # 対角線
     all_test_targets = np.concatenate([r['test_targets'].flatten() for r in fold_results])
     all_test_preds = np.concatenate([r['test_predictions'].flatten() for r in fold_results])
     min_val = min(all_test_targets.min(), all_test_preds.min())
@@ -2193,7 +2484,8 @@ def plot_all_folds_summary(fold_results, save_dir, config, subject_task_info, al
     
     avg_test_mae = np.mean([r['test_mae'] for r in fold_results])
     avg_test_corr = np.mean([r['test_corr'] for r in fold_results])
-    plt.title(f'{config.current_signal_type} - 全Fold テストデータ - 平均MAE: {avg_test_mae:.3f}, 平均Corr: {avg_test_corr:.3f}')
+    plt.title(f'{config.current_signal_type} - 全Fold テストデータ（被験者別） - '
+              f'平均MAE: {avg_test_mae:.3f}, 平均Corr: {avg_test_corr:.3f}')
     
     plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', ncol=3, fontsize=5)
     plt.grid(True, alpha=0.3)
@@ -2201,13 +2493,16 @@ def plot_all_folds_summary(fold_results, save_dir, config, subject_task_info, al
     plt.savefig(save_dir / 'all_folds_test_scatter_by_subject.png', dpi=150, bbox_inches='tight')
     plt.close()
     
-    # Fold別パフォーマンス比較
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+    # Fold別パフォーマンス比較グラフ
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(14, 10))
     
     folds = [f"Fold {r['fold']}" for r in fold_results]
     mae_values = [r['test_mae'] for r in fold_results]
+    rmse_values = [r['test_rmse'] for r in fold_results]
     corr_values = [r['test_corr'] for r in fold_results]
+    r2_values = [r['test_r2'] for r in fold_results]
     
+    # MAE
     bars1 = ax1.bar(folds, mae_values, color=['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FECA57'])
     ax1.axhline(y=np.mean(mae_values), color='r', linestyle='--', 
                 label=f'平均: {np.mean(mae_values):.3f}')
@@ -2216,15 +2511,36 @@ def plot_all_folds_summary(fold_results, save_dir, config, subject_task_info, al
     ax1.legend()
     ax1.grid(True, alpha=0.3)
     
-    bars2 = ax2.bar(folds, corr_values, color=['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FECA57'])
-    ax2.axhline(y=np.mean(corr_values), color='r', linestyle='--', 
-                label=f'平均: {np.mean(corr_values):.3f}')
-    ax2.set_ylabel('相関係数')
-    ax2.set_title('各Foldの相関係数')
-    ax2.set_ylim([0, 1])
+    # RMSE
+    bars2 = ax2.bar(folds, rmse_values, color=['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FECA57'])
+    ax2.axhline(y=np.mean(rmse_values), color='r', linestyle='--', 
+                label=f'平均: {np.mean(rmse_values):.3f}')
+    ax2.set_ylabel('RMSE')
+    ax2.set_title('各FoldのRMSE')
     ax2.legend()
     ax2.grid(True, alpha=0.3)
     
+    # Correlation
+    bars3 = ax3.bar(folds, corr_values, color=['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FECA57'])
+    ax3.axhline(y=np.mean(corr_values), color='r', linestyle='--', 
+                label=f'平均: {np.mean(corr_values):.3f}')
+    ax3.set_ylabel('相関係数')
+    ax3.set_title('各Foldの相関係数')
+    ax3.set_ylim([0, 1])
+    ax3.legend()
+    ax3.grid(True, alpha=0.3)
+    
+    # R²
+    bars4 = ax4.bar(folds, r2_values, color=['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FECA57'])
+    ax4.axhline(y=np.mean(r2_values), color='r', linestyle='--', 
+                label=f'平均: {np.mean(r2_values):.3f}')
+    ax4.set_ylabel('R²')
+    ax4.set_title('各FoldのR²')
+    ax4.set_ylim([0, 1])
+    ax4.legend()
+    ax4.grid(True, alpha=0.3)
+    
+    plt.suptitle(f'{config.current_signal_type} - Fold別パフォーマンス比較')
     plt.tight_layout()
     plt.savefig(save_dir / 'fold_performance_comparison.png', dpi=150, bbox_inches='tight')
     plt.close()
@@ -2238,23 +2554,8 @@ def plot_subject_summary_colored(fold_results, all_test_predictions, all_test_ta
     all_train_preds = []
     all_train_targets = []
     for result in fold_results:
-        task = result['test_task']
-        
-        test_start = config.tasks.index(task) * config.task_duration
-        test_end = test_start + config.task_duration
-        
-        train_preds = np.concatenate([
-            result['train_predictions'][:test_start],
-            result['train_predictions'][test_end-config.task_duration:]
-        ]) if test_start > 0 else result['train_predictions'][test_end-config.task_duration:]
-        
-        train_targets = np.concatenate([
-            result['train_targets'][:test_start],
-            result['train_targets'][test_end-config.task_duration:]
-        ]) if test_start > 0 else result['train_targets'][test_end-config.task_duration:]
-        
-        all_train_preds.extend(train_preds)
-        all_train_targets.extend(train_targets)
+        all_train_preds.extend(result['train_predictions'].flatten())
+        all_train_targets.extend(result['train_targets'].flatten())
     
     all_train_preds = np.array(all_train_preds)
     all_train_targets = np.array(all_train_targets)
@@ -2303,7 +2604,8 @@ def plot_subject_summary_colored(fold_results, all_test_predictions, all_test_ta
     bars1 = ax3.bar(x - width/2, train_mae_values, width, label='訓練', alpha=0.7)
     bars2 = ax3.bar(x + width/2, test_mae_values, width, label='テスト', alpha=0.7)
     
-    for i, (bar1, bar2, result) in enumerate(zip(bars1, bars2, fold_results)):
+    # テストバーをタスクの色で着色
+    for i, (bar2, result) in enumerate(zip(bars2, fold_results)):
         task = result['test_task']
         bar2.set_color(config.task_colors[task])
     
@@ -2315,7 +2617,6 @@ def plot_subject_summary_colored(fold_results, all_test_predictions, all_test_ta
     ax3.legend()
     ax3.grid(True, alpha=0.3)
     
-    avg_train_mae = np.mean(train_mae_values)
     avg_test_mae = np.mean(test_mae_values)
     ax3.axhline(y=avg_test_mae, color='red', linestyle='--', linewidth=1, alpha=0.5)
     
@@ -2326,7 +2627,8 @@ def plot_subject_summary_colored(fold_results, all_test_predictions, all_test_ta
     bars3 = ax4.bar(x - width/2, train_corr_values, width, label='訓練', alpha=0.7)
     bars4 = ax4.bar(x + width/2, test_corr_values, width, label='テスト', alpha=0.7)
     
-    for i, (bar3, bar4, result) in enumerate(zip(bars3, bars4, fold_results)):
+    # テストバーをタスクの色で着色
+    for i, (bar4, result) in enumerate(zip(bars4, fold_results)):
         task = result['test_task']
         bar4.set_color(config.task_colors[task])
     
@@ -2350,7 +2652,7 @@ def plot_subject_summary_colored(fold_results, all_test_predictions, all_test_ta
     return train_mae, train_corr, test_mae, test_corr
 
 def plot_all_subjects_summary_unified(all_subjects_results, config):
-    """全被験者の統合サマリープロット"""
+    """全被験者の統合サマリープロット（Within-Subject用）"""
     save_dir = Path(config.save_path)
     
     fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(14, 10))
@@ -2379,8 +2681,8 @@ def plot_all_subjects_summary_unified(all_subjects_results, config):
     
     avg_train_mae = np.mean(train_maes)
     avg_test_mae = np.mean(test_maes)
-    ax1.axhline(y=avg_train_mae, color='blue', linestyle='--', alpha=0.5)
-    ax1.axhline(y=avg_test_mae, color='orange', linestyle='--', alpha=0.5)
+    ax1.axhline(y=avg_train_mae, color='blue', linestyle='--', alpha=0.5, label=f'訓練平均: {avg_train_mae:.3f}')
+    ax1.axhline(y=avg_test_mae, color='orange', linestyle='--', alpha=0.5, label=f'テスト平均: {avg_test_mae:.3f}')
     
     # 2. 相関係数比較（被験者別）
     bars3 = ax2.bar(x - width/2, train_corrs, width, label='訓練', alpha=0.7, color='blue')
@@ -2397,14 +2699,14 @@ def plot_all_subjects_summary_unified(all_subjects_results, config):
     
     avg_train_corr = np.mean(train_corrs)
     avg_test_corr = np.mean(test_corrs)
-    ax2.axhline(y=avg_train_corr, color='blue', linestyle='--', alpha=0.5)
-    ax2.axhline(y=avg_test_corr, color='orange', linestyle='--', alpha=0.5)
+    ax2.axhline(y=avg_train_corr, color='blue', linestyle='--', alpha=0.5, label=f'訓練平均: {avg_train_corr:.3f}')
+    ax2.axhline(y=avg_test_corr, color='orange', linestyle='--', alpha=0.5, label=f'テスト平均: {avg_test_corr:.3f}')
     
     # 3. MAE分布（ヒストグラム）
-    ax3.hist(train_maes, bins=10, alpha=0.5, label='訓練', color='blue')
-    ax3.hist(test_maes, bins=10, alpha=0.5, label='テスト', color='orange')
-    ax3.axvline(x=avg_train_mae, color='blue', linestyle='--', label=f'訓練平均: {avg_train_mae:.3f}')
-    ax3.axvline(x=avg_test_mae, color='orange', linestyle='--', label=f'テスト平均: {avg_test_mae:.3f}')
+    ax3.hist(train_maes, bins=10, alpha=0.5, label=f'訓練 (平均: {avg_train_mae:.3f})', color='blue')
+    ax3.hist(test_maes, bins=10, alpha=0.5, label=f'テスト (平均: {avg_test_mae:.3f})', color='orange')
+    ax3.axvline(x=avg_train_mae, color='blue', linestyle='--')
+    ax3.axvline(x=avg_test_mae, color='orange', linestyle='--')
     ax3.set_xlabel('MAE')
     ax3.set_ylabel('頻度')
     ax3.set_title('MAE分布')
@@ -2412,10 +2714,10 @@ def plot_all_subjects_summary_unified(all_subjects_results, config):
     ax3.grid(True, alpha=0.3)
     
     # 4. 相関係数分布（ヒストグラム）
-    ax4.hist(train_corrs, bins=10, alpha=0.5, label='訓練', color='blue')
-    ax4.hist(test_corrs, bins=10, alpha=0.5, label='テスト', color='orange')
-    ax4.axvline(x=avg_train_corr, color='blue', linestyle='--', label=f'訓練平均: {avg_train_corr:.3f}')
-    ax4.axvline(x=avg_test_corr, color='orange', linestyle='--', label=f'テスト平均: {avg_test_corr:.3f}')
+    ax4.hist(train_corrs, bins=10, alpha=0.5, label=f'訓練 (平均: {avg_train_corr:.3f})', color='blue')
+    ax4.hist(test_corrs, bins=10, alpha=0.5, label=f'テスト (平均: {avg_test_corr:.3f})', color='orange')
+    ax4.axvline(x=avg_train_corr, color='blue', linestyle='--')
+    ax4.axvline(x=avg_test_corr, color='orange', linestyle='--')
     ax4.set_xlabel('相関係数')
     ax4.set_ylabel('頻度')
     ax4.set_title('相関係数分布')
@@ -2428,7 +2730,7 @@ def plot_all_subjects_summary_unified(all_subjects_results, config):
     plt.close()
 
 # ================================
-# メイン実行
+# メイン実行関数
 # ================================
 def main():
     """メイン実行関数"""
@@ -2437,12 +2739,12 @@ def main():
     # 乱数シード設定
     set_all_seeds(config.random_seed)
     
-    import time
     total_start_time = time.time()
     
     print("\n" + "="*60)
-    print(" PhysNet2DCNN - 高速化版")
+    print(" PhysNet2DCNN - 高速化版（信号正規化対応）")
     print("="*60)
+    print(f"実行日時: {config.timestamp}")
     print(f"モード: {config.model_mode}")
     
     if config.model_mode == 'cross_subject':
@@ -2451,10 +2753,12 @@ def main():
         print(f"信号タイプ: {config.signal_type}")
     
     print(f"モデルタイプ: {config.model_type}")
-    print(f"チャンネル: {config.use_channel}")
+    print(f"使用チャンネル: {config.use_channel}")
+    print(f"信号正規化: {config.normalize_signal} (方法: {config.signal_normalization_method})")
     
     if config.model_mode == 'cross_subject':
         print(f"交差検証: {config.n_folds}分割")
+        print(f"各foldに各被験者のデータを含める: {config.ensure_subject_in_each_fold}")
     else:
         print(f"交差検証: 6分割（タスク別）")
     
@@ -2501,38 +2805,65 @@ def main():
         summary_df.to_csv(save_dir / 'all_signals_summary.csv', index=False)
         
         # 全指標の比較グラフ
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
-        
-        signals = [r['signal_type'] for r in all_signals_results]
-        test_maes = [r['avg_test_mae'] for r in all_signals_results]
-        test_corrs = [r['avg_test_corr'] for r in all_signals_results]
-        test_mae_stds = [r['std_test_mae'] for r in all_signals_results]
-        test_corr_stds = [r['std_test_corr'] for r in all_signals_results]
-        
-        x = np.arange(len(signals))
-        
-        # MAE比較
-        ax1.bar(x, test_maes, yerr=test_mae_stds, capsize=5)
-        ax1.set_xlabel('指標')
-        ax1.set_ylabel('MAE')
-        ax1.set_title('各指標のMAE比較')
-        ax1.set_xticks(x)
-        ax1.set_xticklabels(signals, rotation=45)
-        ax1.grid(True, alpha=0.3)
-        
-        # 相関係数比較
-        ax2.bar(x, test_corrs, yerr=test_corr_stds, capsize=5)
-        ax2.set_xlabel('指標')
-        ax2.set_ylabel('相関係数')
-        ax2.set_title('各指標の相関係数比較')
-        ax2.set_xticks(x)
-        ax2.set_xticklabels(signals, rotation=45)
-        ax2.set_ylim([0, 1])
-        ax2.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        plt.savefig(save_dir / 'all_signals_comparison.png', dpi=150, bbox_inches='tight')
-        plt.close()
+        if len(all_signals_results) > 1:
+            fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(14, 10))
+            
+            signals = [r['signal_type'] for r in all_signals_results]
+            test_maes = [r['avg_test_mae'] for r in all_signals_results]
+            test_corrs = [r['avg_test_corr'] for r in all_signals_results]
+            test_mae_stds = [r['std_test_mae'] for r in all_signals_results]
+            test_corr_stds = [r['std_test_corr'] for r in all_signals_results]
+            
+            x = np.arange(len(signals))
+            
+            # MAE比較
+            bars1 = ax1.bar(x, test_maes, yerr=test_mae_stds, capsize=5)
+            ax1.set_xlabel('指標')
+            ax1.set_ylabel('MAE')
+            ax1.set_title('各指標のMAE比較')
+            ax1.set_xticks(x)
+            ax1.set_xticklabels(signals, rotation=45)
+            ax1.grid(True, alpha=0.3)
+            
+            for i, (bar, val, std) in enumerate(zip(bars1, test_maes, test_mae_stds)):
+                ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height() + std,
+                        f'{val:.3f}', ha='center', va='bottom', fontsize=8)
+            
+            # 相関係数比較
+            bars2 = ax2.bar(x, test_corrs, yerr=test_corr_stds, capsize=5)
+            ax2.set_xlabel('指標')
+            ax2.set_ylabel('相関係数')
+            ax2.set_title('各指標の相関係数比較')
+            ax2.set_xticks(x)
+            ax2.set_xticklabels(signals, rotation=45)
+            ax2.set_ylim([0, 1])
+            ax2.grid(True, alpha=0.3)
+            
+            for i, (bar, val, std) in enumerate(zip(bars2, test_corrs, test_corr_stds)):
+                ax2.text(bar.get_x() + bar.get_width()/2, bar.get_height() + std,
+                        f'{val:.3f}', ha='center', va='bottom', fontsize=8)
+            
+            # MAEの箱ひげ図
+            ax3.boxplot([r['avg_test_mae'] for r in all_signals_results],
+                       labels=signals)
+            ax3.set_xlabel('指標')
+            ax3.set_ylabel('MAE')
+            ax3.set_title('MAE分布')
+            ax3.grid(True, alpha=0.3)
+            
+            # 相関係数の箱ひげ図
+            ax4.boxplot([r['avg_test_corr'] for r in all_signals_results],
+                       labels=signals)
+            ax4.set_xlabel('指標')
+            ax4.set_ylabel('相関係数')
+            ax4.set_title('相関係数分布')
+            ax4.set_ylim([0, 1])
+            ax4.grid(True, alpha=0.3)
+            
+            plt.suptitle('全指標パフォーマンス比較', fontsize=14, fontweight='bold')
+            plt.tight_layout()
+            plt.savefig(save_dir / 'all_signals_comparison.png', dpi=150, bbox_inches='tight')
+            plt.close()
         
         total_time = time.time() - total_start_time
         
@@ -2547,9 +2878,13 @@ def main():
             f.write(f"モデルタイプ: {config.model_type}\n")
             f.write(f"使用チャンネル: {config.use_channel}\n")
             f.write(f"LABデータ使用: {config.use_lab}\n")
+            f.write(f"信号正規化: {config.normalize_signal} (方法: {config.signal_normalization_method})\n")
             f.write(f"交差検証: {config.n_folds}分割\n")
+            f.write(f"各foldに各被験者のデータを含める: {config.ensure_subject_in_each_fold}\n")
             f.write(f"バッチサイズ: {config.batch_size}\n")
             f.write(f"エポック数: {config.epochs}\n")
+            f.write(f"学習率: {config.learning_rate}\n")
+            f.write(f"損失関数: {config.loss_type}\n")
             f.write(f"総処理時間: {total_time:.1f}秒 ({total_time/60:.1f}分)\n")
             f.write("\n結果サマリー:\n")
             for result in all_signals_results:
@@ -2585,8 +2920,8 @@ def main():
             subject_save_dir.mkdir(parents=True, exist_ok=True)
             
             try:
-                # データ読み込み
-                rgb_data, signal_data = load_data_single_subject(subject, config)
+                # データ読み込み（正規化付き）
+                rgb_data, signal_data, signal_normalizer = load_data_single_subject(subject, config)
                 
                 if rgb_data is None or signal_data is None:
                     print(f"  {subject}のデータ読み込み失敗。スキップします。")
@@ -2614,10 +2949,7 @@ def main():
                     'train_corr': train_corr,
                     'test_mae': test_mae,
                     'test_corr': test_corr,
-                    'fold_results': fold_results,
-                    'all_test_predictions': all_test_predictions,
-                    'all_test_targets': all_test_targets,
-                    'all_test_tasks': all_test_tasks
+                    'fold_results': fold_results
                 })
                 
                 subject_time = time.time() - subject_start_time
@@ -2669,8 +3001,10 @@ def main():
             std_test_corr = np.std([r['test_corr'] for r in all_subjects_results])
             
             print(f"\n全被験者平均結果:")
-            print(f"  訓練: MAE={avg_train_mae:.4f}±{std_train_mae:.4f}, Corr={avg_train_corr:.4f}±{std_train_corr:.4f}")
-            print(f"  テスト: MAE={avg_test_mae:.4f}±{std_test_mae:.4f}, Corr={avg_test_corr:.4f}±{std_test_corr:.4f}")
+            print(f"  訓練: MAE={avg_train_mae:.4f}±{std_train_mae:.4f}, "
+                  f"Corr={avg_train_corr:.4f}±{std_train_corr:.4f}")
+            print(f"  テスト: MAE={avg_test_mae:.4f}±{std_test_mae:.4f}, "
+                  f"Corr={avg_test_corr:.4f}±{std_test_corr:.4f}")
             
             # 全体結果をCSVファイルに保存
             all_results_df = pd.DataFrame([{
@@ -2716,6 +3050,7 @@ def main():
                 f.write(f"信号タイプ: {config.signal_type}\n")
                 f.write(f"使用チャンネル: {config.use_channel}\n")
                 f.write(f"LABデータ使用: {config.use_lab}\n")
+                f.write(f"信号正規化: {config.normalize_signal} (方法: {config.signal_normalization_method})\n")
                 f.write(f"訓練:検証比率: {config.train_val_split_ratio}:{1-config.train_val_split_ratio}\n")
                 f.write(f"検証分割戦略: {config.validation_split_strategy}\n")
                 if config.validation_split_strategy == 'stratified':
@@ -2723,6 +3058,9 @@ def main():
                     f.write(f"  分割方法: {config.stratification_method}\n")
                 f.write(f"データ拡張: {config.use_augmentation}\n")
                 f.write(f"バッチサイズ: {config.batch_size}\n")
+                f.write(f"エポック数: {config.epochs}\n")
+                f.write(f"学習率: {config.learning_rate}\n")
+                f.write(f"損失関数: {config.loss_type}\n")
                 f.write("\n高速化設定:\n")
                 f.write(f"  AMP (自動混合精度): {config.use_amp}\n")
                 f.write(f"  torch.compile: {config.use_compile}\n")
@@ -2733,7 +3071,8 @@ def main():
                 f.write(f"平均訓練相関: {avg_train_corr:.4f}±{std_train_corr:.4f}\n")
                 f.write(f"平均テストMAE: {avg_test_mae:.4f}±{std_test_mae:.4f}\n")
                 f.write(f"平均テスト相関: {avg_test_corr:.4f}±{std_test_corr:.4f}\n")
-                f.write(f"平均処理時間/被験者: {total_time/len(all_subjects_results):.1f}秒\n")
+                if len(all_subjects_results) > 0:
+                    f.write(f"平均処理時間/被験者: {total_time/len(all_subjects_results):.1f}秒\n")
     
     print(f"\n{'='*60}")
     print("処理完了")
