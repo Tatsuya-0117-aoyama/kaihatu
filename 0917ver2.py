@@ -109,7 +109,7 @@ class Config:
         # ================================
         # LAB変換データ使用設定
         # ================================
-        self.use_lab = True  # LABデータを使用するか
+        self.use_lab = False  # LABデータを使用するか
         self.lab_filename = "_downsampled_1Hzver2.npy"  # LABデータのファイル名
         
         # ================================
