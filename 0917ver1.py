@@ -68,7 +68,7 @@ class Config:
         # ================================
         # 使用する指標の選択（新機能）
         # ================================
-        # 利用可能な指標: ['CO', 'SV', 'HR_CO_SV', 'Cwk', 'Rp', 'Zao', 'I0', 'LIET', 'reDIA', 'reSYS']
+        # 利用可能な指標: ['CO', 'SV', 'HR_CO_SV', 'Cwk', 'Rp', 'Zao', 'I0', 'LVET', 'reDIA', 'reSYS']
         self.target_indicators = ['CO']  # デフォルトはCOのみ
         # self.target_indicators = ['CO', 'SV', 'HR_CO_SV']  # 複数指標の例
         
