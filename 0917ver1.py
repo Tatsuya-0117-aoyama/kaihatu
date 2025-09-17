@@ -214,7 +214,11 @@ class Config:
         # Early Stopping改善設定
         self.patience_improvement_threshold = 0.995
         self.min_delta = 0.0001
-        
+
+        self.temporal_mode = "interpolate"  # "preserve" or "interpolate"
+        # preserve: 時間次元360を保持（メモリ使用量大、高精度）
+        # interpolate: 45まで圧縮→90→360に補間（メモリ効率的）
+ 
         # 表示設定
         self.verbose = True
         self.random_seed = 42
@@ -790,13 +794,12 @@ class IndicatorBranch(nn.Module):
         
         return x
 
-# ================================
-# CalibrationPhys準拠 PhysNet2DCNN (3D版)
-# ================================
 class PhysNet2DCNN_3D(nn.Module):
     """CalibrationPhys論文準拠のPhysNet2DCNN（3D畳み込み版）"""
-    def __init__(self, input_shape=None):
+    def __init__(self, input_shape=None, temporal_mode="interpolate"):
         super(PhysNet2DCNN_3D, self).__init__()
+        
+        self.temporal_mode = temporal_mode
         
         if input_shape is not None:
             in_channels = input_shape[-1]
@@ -832,10 +835,17 @@ class PhysNet2DCNN_3D(nn.Module):
         self.bn2_2 = nn.BatchNorm3d(64, momentum=0.01, eps=1e-5)
         self.elu2_2 = nn.ELU(inplace=True)
         
-        if height <= 16 or width <= 16:
-            self.pool2 = nn.AvgPool3d(kernel_size=(2, 1, 1), stride=(2, 1, 1))
-        else:
-            self.pool2 = nn.AvgPool3d(kernel_size=(2, 2, 2), stride=(2, 2, 2))
+        # temporal_modeに応じてプーリングを変更
+        if self.temporal_mode == "preserve":
+            if height <= 16 or width <= 16:
+                self.pool2 = nn.Identity()
+            else:
+                self.pool2 = nn.AvgPool3d(kernel_size=(1, 2, 2), stride=(1, 2, 2))
+        else:  # interpolate mode
+            if height <= 16 or width <= 16:
+                self.pool2 = nn.AvgPool3d(kernel_size=(2, 1, 1), stride=(2, 1, 1))
+            else:
+                self.pool2 = nn.AvgPool3d(kernel_size=(2, 2, 2), stride=(2, 2, 2))
         
         # ConvBlock 3: 64 filters
         self.conv3_1 = nn.Conv3d(64, 64, kernel_size=(3, 3, 3), padding=(1, 1, 1))
@@ -846,7 +856,10 @@ class PhysNet2DCNN_3D(nn.Module):
         self.bn3_2 = nn.BatchNorm3d(64, momentum=0.01, eps=1e-5)
         self.elu3_2 = nn.ELU(inplace=True)
         
-        self.pool3 = nn.AvgPool3d(kernel_size=(2, 1, 1), stride=(2, 1, 1))
+        if self.temporal_mode == "preserve":
+            self.pool3 = nn.Identity()
+        else:
+            self.pool3 = nn.AvgPool3d(kernel_size=(2, 1, 1), stride=(2, 1, 1))
         
         # ConvBlock 4: 64 filters
         self.conv4_1 = nn.Conv3d(64, 64, kernel_size=(3, 3, 3), padding=(1, 1, 1))
@@ -857,7 +870,10 @@ class PhysNet2DCNN_3D(nn.Module):
         self.bn4_2 = nn.BatchNorm3d(64, momentum=0.01, eps=1e-5)
         self.elu4_2 = nn.ELU(inplace=True)
         
-        self.pool4 = nn.AvgPool3d(kernel_size=(2, 1, 1), stride=(2, 1, 1))
+        if self.temporal_mode == "preserve":
+            self.pool4 = nn.Identity()
+        else:
+            self.pool4 = nn.AvgPool3d(kernel_size=(2, 1, 1), stride=(2, 1, 1))
         
         # ConvBlock 5: 64 filters with upsampling
         self.conv5_1 = nn.Conv3d(64, 64, kernel_size=(3, 3, 3), padding=(1, 1, 1))
@@ -868,7 +884,10 @@ class PhysNet2DCNN_3D(nn.Module):
         self.bn5_2 = nn.BatchNorm3d(64, momentum=0.01, eps=1e-5)
         self.elu5_2 = nn.ELU(inplace=True)
         
-        self.upsample = nn.Upsample(scale_factor=(2, 1, 1), mode='trilinear', align_corners=False)
+        if self.temporal_mode == "preserve":
+            self.upsample = nn.Identity()
+        else:
+            self.upsample = nn.Upsample(scale_factor=(2, 1, 1), mode='trilinear', align_corners=False)
         
         # ConvBlock 6: 64 filters
         self.conv6_1 = nn.Conv3d(64, 64, kernel_size=(1, 3, 3), padding=(0, 1, 1))
@@ -882,23 +901,10 @@ class PhysNet2DCNN_3D(nn.Module):
         # Adaptive Spatial Global Average Pooling
         self.spatial_pool = nn.AdaptiveAvgPool3d((None, 1, 1))
         
-        # Final Conv
-        self.conv_final = nn.Conv3d(64, 1, kernel_size=1)
-        
         # Dropout
         self.dropout = nn.Dropout(0.2)
         
         self._initialize_weights()
-    
-    def _initialize_weights(self):
-        for m in self.modules():
-            if isinstance(m, nn.Conv3d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.BatchNorm3d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
     
     def forward(self, x):
         batch_size = x.size(0)
@@ -960,6 +966,14 @@ class PhysNet2DCNN_3D(nn.Module):
         
         x = self.spatial_pool(x)
         x = x.squeeze(-1).squeeze(-1)
+        
+        # temporal_modeに応じて処理を分岐
+        current_time_frames = x.size(-1)
+        if self.temporal_mode == "interpolate" and current_time_frames != time_frames:
+            # 線形補間で元の時間長に戻す
+            x = x.unsqueeze(1)  # (B, 1, C, T)
+            x = F.interpolate(x, size=time_frames, mode='linear', align_corners=False)
+            x = x.squeeze(1)  # (B, C, T)
         
         # 特徴を返す（統合モデル用）
         return x.transpose(1, 2)  # (B, T, 64)
@@ -1155,7 +1169,6 @@ class PhysNet2DCNN_2D(nn.Module):
 # 統合モデル（自動損失バランシング版）
 # ================================
 class MultiIndicatorModel_AutoBalance(nn.Module):
-    """自動損失バランシングを使用する統合モデル"""
     def __init__(self, config):
         super().__init__()
         
@@ -1163,9 +1176,10 @@ class MultiIndicatorModel_AutoBalance(nn.Module):
         self.indicator_names = config.target_indicators
         self.num_indicators = len(self.indicator_names)
         
-        # RGB特徴抽出器
+        # RGB特徴抽出器（temporal_modeを渡す）
         if config.model_type == "3d":
-            self.rgb_branch = PhysNet2DCNN_3D(config.input_shape)
+            temporal_mode = getattr(config, 'temporal_mode', 'interpolate')
+            self.rgb_branch = PhysNet2DCNN_3D(config.input_shape, temporal_mode=temporal_mode)
         else:
             self.rgb_branch = PhysNet2DCNN_2D(config.input_shape)
         
@@ -1323,12 +1337,13 @@ def create_model(config):
     """設定に基づいてモデルを作成"""
     
     if len(config.target_indicators) == 1:
-        # 単一指標の場合は既存のモデルを使用
+        # 単一指標の場合
         if config.model_type == "3d":
             class SingleIndicatorModel3D(nn.Module):
                 def __init__(self, config):
                     super().__init__()
-                    self.base_model = PhysNet2DCNN_3D(config.input_shape)
+                    temporal_mode = getattr(config, 'temporal_mode', 'interpolate')
+                    self.base_model = PhysNet2DCNN_3D(config.input_shape, temporal_mode=temporal_mode)
                     self.conv_final = nn.Conv1d(64, 1, kernel_size=1)
                 
                 def forward(self, x):
@@ -1338,7 +1353,8 @@ def create_model(config):
                     return x.squeeze(1)  # (B, T)
             
             model = SingleIndicatorModel3D(config)
-            model_name = "PhysNet2DCNN_3D (単一指標)"
+            temporal_str = getattr(config, 'temporal_mode', 'interpolate')
+            model_name = f"PhysNet2DCNN_3D (単一指標, 時間次元: {temporal_str})"
         else:
             class SingleIndicatorModel2D(nn.Module):
                 def __init__(self, config):
