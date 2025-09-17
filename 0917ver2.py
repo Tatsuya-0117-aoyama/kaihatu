@@ -796,10 +796,10 @@ class PhysNet2DCNN_3D(nn.Module):
     入力: (batch_size, time_frames, height, width, channels)
     出力: (batch_size, time_frames) or (batch_size, time_frames, n_signals)
     """
-    def __init__(self, input_shape=None, output_channels=1):
+    def __init__(self, input_shape=None, output_channels=1):  # output_channelsを追加（デフォルト1）
         super(PhysNet2DCNN_3D, self).__init__()
         
-        self.output_channels = output_channels
+        self.output_channels = output_channels  # 追加
         
         # 入力チャンネル数を動的に設定
         if input_shape is not None:
@@ -814,6 +814,7 @@ class PhysNet2DCNN_3D(nn.Module):
         # 入力サイズに基づいてプーリングサイズを調整
         self.adaptive_pooling = height < 36 or width < 36
         
+        # [元のコードと完全に同じConvBlock構造]
         # ConvBlock 1: 32 filters
         self.conv1_1 = nn.Conv3d(in_channels, 32, kernel_size=(1, 5, 5), padding=(0, 2, 2))
         self.bn1_1 = nn.BatchNorm3d(32, momentum=0.01, eps=1e-5)
@@ -890,8 +891,8 @@ class PhysNet2DCNN_3D(nn.Module):
         # Adaptive Spatial Global Average Pooling
         self.spatial_pool = nn.AdaptiveAvgPool3d((None, 1, 1))
         
-        # Final Conv
-        self.conv_final = nn.Conv3d(64, self.output_channels, kernel_size=1)
+        # Final Conv - 唯一の変更点
+        self.conv_final = nn.Conv3d(64, self.output_channels, kernel_size=1)  # 1 → output_channels
         
         # Dropout
         self.dropout = nn.Dropout(0.2)
@@ -912,30 +913,16 @@ class PhysNet2DCNN_3D(nn.Module):
     
     def forward(self, x):
         """
-        入力: x shape (B, T, H, W, C) または (T, H, W, C)
+        入力: x shape (B, T, H, W, C)
         出力: shape (B, T) or (B, T, output_channels)
         """
-        # 入力の次元を確認してバッチ次元を追加（必要な場合）
-        if x.dim() == 4:  # (T, H, W, C) の場合
-            x = x.unsqueeze(0)  # (1, T, H, W, C)
-            batch_size = 1
-            squeeze_batch = True
-        else:  # (B, T, H, W, C) の場合
-            batch_size = x.size(0)
-            squeeze_batch = False
-        
+        batch_size = x.size(0)
         time_frames = x.size(1)
         
-        # デバッグ情報
-        # print(f"Input shape: {x.shape}")
-        
         # PyTorchのConv3dは (B, C, D, H, W)を期待
-        # xが5次元であることを確認
-        if x.dim() != 5:
-            raise ValueError(f"Expected 5D input (B, T, H, W, C), got {x.dim()}D with shape {x.shape}")
-        
         x = x.permute(0, 4, 1, 2, 3)  # (B, C, T, H, W)
         
+        # [元のコードと完全に同じforward処理]
         # ConvBlock 1
         x = self.conv1_1(x)
         x = self.bn1_1(x)
@@ -999,19 +986,15 @@ class PhysNet2DCNN_3D(nn.Module):
         # Final Conv
         x = self.conv_final(x)
         
-        # 出力を整形
+        # 出力を整形 - 複数出力対応の修正
         if self.output_channels == 1:
-            # 単一出力の場合
-            x = x.squeeze(1).squeeze(-1).squeeze(-1)  # (B, T)
+            # 単一出力の場合（元のコードと同じ）
+            x = x.squeeze(1).squeeze(-1).squeeze(-1)
             
             # 元の時間長に補間
             if x.size(-1) != time_frames:
                 x = F.interpolate(x.unsqueeze(1), size=time_frames, mode='linear', align_corners=False)
                 x = x.squeeze(1)
-            
-            # バッチ次元を削除（必要な場合）
-            if squeeze_batch:
-                x = x.squeeze(0)
         else:
             # 複数出力の場合
             x = x.squeeze(-1).squeeze(-1)  # (B, output_channels, T)
@@ -1022,10 +1005,6 @@ class PhysNet2DCNN_3D(nn.Module):
                 x = x.permute(0, 2, 1)  # (B, output_channels, T)
                 x = F.interpolate(x, size=time_frames, mode='linear', align_corners=False)
                 x = x.permute(0, 2, 1)  # (B, T, output_channels)
-            
-            # バッチ次元を削除（必要な場合）
-            if squeeze_batch:
-                x = x.squeeze(0)
         
         return x
 
@@ -1255,27 +1234,36 @@ def load_data_single_subject(subject, config):
             lab_data = np.load(lab_path)
             print(f"  LABデータ読み込み成功: {lab_data.shape}")
             
+            # RGBとLABデータの形状を確認
             if rgb_data.shape == lab_data.shape:
+                # RGB+LABデータを結合（チャンネル次元で連結）
                 combined_data = np.concatenate([rgb_data, lab_data], axis=-1)
                 print(f"  RGB+LAB結合データ: {combined_data.shape}")
                 
+                # データの正規化（LABデータも0-1の範囲に）
                 if lab_data.max() > 1.0:
                     combined_data[..., 3:] = combined_data[..., 3:] / 255.0
                 
                 rgb_data = combined_data
             else:
                 print(f"警告: {subject}のRGBとLABデータの形状が一致しません")
+                print(f"  RGB shape: {rgb_data.shape}, LAB shape: {lab_data.shape}")
                 config.use_lab = False
                 config.use_channel = 'RGB'
                 config.num_channels = 3
         else:
-            print(f"警告: {subject}のLABデータが見つかりません")
+            print(f"警告: {subject}のLABデータが見つかりません: {lab_path}")
+            print(f"  LABデータなしで処理を続行します。")
             config.use_lab = False
             config.use_channel = 'RGB'
             config.num_channels = 3
     
-    # ここの処理を修正 - データは既に(T, H, W, C)形式なので何もしない
-    # rgb_dataの形状は (360, H, W, C) のまま使用
+    # データ形状の確認と調整
+    if rgb_data.ndim == 5:  # (N, T, H, W, C)
+        pass
+    elif rgb_data.ndim == 4:  # (N, H, W, C) の場合、時間次元を追加
+        rgb_data = np.expand_dims(rgb_data, axis=1)
+        rgb_data = np.repeat(rgb_data, config.time_frames, axis=1)
     
     # 複数指標の信号データ読み込み
     all_signals_data = []
@@ -1673,21 +1661,6 @@ def train_model_multi(model, train_loader, val_loader, config, fold=None, subjec
     fold_str = f"Fold {fold+1}" if fold is not None else ""
     subject_str = f"{subject}" if subject is not None else ""
     
-    # モデル保存先とファイル名を最初に決定
-    if save_dir is None:
-        save_dir = Path(config.save_path)
-        if config.cross_validation_mode == "within_subject" and subject is not None:
-            save_dir = save_dir / subject
-    else:
-        save_dir = Path(save_dir)
-    save_dir.mkdir(parents=True, exist_ok=True)
-    
-    # model_nameを最初に定義
-    if fold is not None:
-        model_name = f'best_model_fold{fold+1}.pth'
-    else:
-        model_name = f'best_model_{config.model_type}.pth'
-    
     if config.verbose:
         print(f"\n  学習開始 {subject_str} {fold_str}")
         print(f"    モデル: {config.model_type}")
@@ -1765,7 +1738,6 @@ def train_model_multi(model, train_loader, val_loader, config, fold=None, subjec
     val_losses = []
     best_val_loss = float('inf')
     patience_counter = 0
-    model_saved = False  # モデル保存フラグ
     
     # 各指標の記録
     train_metrics_best = {signal: {'predictions': [], 'targets': []} 
@@ -1868,31 +1840,37 @@ def train_model_multi(model, train_loader, val_loader, config, fold=None, subjec
                 scheduler.step()
         
         # モデル保存判定
-        if val_loss < best_val_loss:
-            improvement = (best_val_loss - val_loss) / best_val_loss if best_val_loss != float('inf') else 1
-            if improvement > config.min_delta or epoch == 0:  # 初回は必ず保存
-                best_val_loss = val_loss
-                patience_counter = 0
-                model_saved = True
-                
-                # 最良時の予測値を保存
-                for signal in config.target_signals:
-                    train_metrics_best[signal]['predictions'] = np.array(train_preds_epoch[signal])
-                    train_metrics_best[signal]['targets'] = np.array(train_targets_epoch[signal])
-                
-                # モデルを保存
-                torch.save({
-                    'model_state_dict': model.state_dict(),
-                    'epoch': epoch,
-                    'best_val_loss': best_val_loss,
-                    'model_type': config.model_type,
-                    'target_signals': config.target_signals
-                }, save_dir / model_name)
-                
-                if config.verbose:
-                    print(f"      モデル保存 (epoch {epoch+1}, val_loss: {val_loss:.4f})")
+        improvement = (best_val_loss - val_loss) / best_val_loss if best_val_loss > 0 else 1
+        if improvement > config.min_delta:
+            best_val_loss = val_loss
+            patience_counter = 0
+            
+            # 最良時の予測値を保存
+            for signal in config.target_signals:
+                train_metrics_best[signal]['predictions'] = np.array(train_preds_epoch[signal])
+                train_metrics_best[signal]['targets'] = np.array(train_targets_epoch[signal])
+            
+            # モデル保存先の決定
+            if save_dir is None:
+                save_dir = Path(config.save_path)
+                if config.cross_validation_mode == "within_subject" and subject is not None:
+                    save_dir = save_dir / subject
             else:
-                patience_counter += 1
+                save_dir = Path(save_dir)
+            save_dir.mkdir(parents=True, exist_ok=True)
+            
+            if fold is not None:
+                model_name = f'best_model_fold{fold+1}.pth'
+            else:
+                model_name = f'best_model_{config.model_type}.pth'
+            
+            torch.save({
+                'model_state_dict': model.state_dict(),
+                'epoch': epoch,
+                'best_val_loss': best_val_loss,
+                'model_type': config.model_type,
+                'target_signals': config.target_signals
+            }, save_dir / model_name)
         else:
             patience_counter += 1
         
@@ -1924,24 +1902,9 @@ def train_model_multi(model, train_loader, val_loader, config, fold=None, subjec
                 print(f"    Early stopping at epoch {epoch+1}")
             break
     
-    # ベストモデル読み込み（ファイルが存在する場合のみ）
-    model_path = save_dir / model_name
-    if model_saved and model_path.exists():
-        checkpoint = torch.load(model_path)
-        model.load_state_dict(checkpoint['model_state_dict'])
-        if config.verbose:
-            print(f"    ベストモデルを読み込みました: {model_name}")
-    else:
-        if config.verbose:
-            print(f"    警告: モデルが改善されなかったため、最終エポックのモデルを使用します")
-        # 最後のエポックの予測値を使用
-        for signal in config.target_signals:
-            if len(train_preds_epoch[signal]) > 0:
-                train_metrics_best[signal]['predictions'] = np.array(train_preds_epoch[signal])
-                train_metrics_best[signal]['targets'] = np.array(train_targets_epoch[signal])
-            else:
-                train_metrics_best[signal]['predictions'] = np.array([])
-                train_metrics_best[signal]['targets'] = np.array([])
+    # ベストモデル読み込み
+    checkpoint = torch.load(save_dir / model_name)
+    model.load_state_dict(checkpoint['model_state_dict'])
     
     # メトリクス計算
     train_metrics = {}
@@ -1949,14 +1912,8 @@ def train_model_multi(model, train_loader, val_loader, config, fold=None, subjec
         preds = train_metrics_best[signal]['predictions']
         targets = train_metrics_best[signal]['targets']
         
-        if len(preds) > 0 and len(targets) > 0:
-            mae = mean_absolute_error(targets, preds)
-            corr = np.corrcoef(targets, preds)[0, 1] if len(preds) > 1 else 0.0
-        else:
-            mae = float('inf')
-            corr = 0.0
-            if config.verbose:
-                print(f"    警告: {signal}の予測値が空です")
+        mae = mean_absolute_error(targets, preds)
+        corr = np.corrcoef(targets, preds)[0, 1] if len(preds) > 1 else 0.0
         
         train_metrics[signal] = {
             'mae': mae,
