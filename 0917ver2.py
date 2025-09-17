@@ -1744,6 +1744,7 @@ def train_model_multi(model, train_loader, val_loader, config, fold=None, subjec
     val_losses = []
     best_val_loss = float('inf')
     patience_counter = 0
+    model_saved = False  # モデル保存フラグ
     
     # 各指標の記録
     train_metrics_best = {signal: {'predictions': [], 'targets': []} 
@@ -1846,24 +1847,31 @@ def train_model_multi(model, train_loader, val_loader, config, fold=None, subjec
                 scheduler.step()
         
         # モデル保存判定
-        improvement = (best_val_loss - val_loss) / best_val_loss if best_val_loss > 0 else 1
-        if improvement > config.min_delta:
-            best_val_loss = val_loss
-            patience_counter = 0
-            
-            # 最良時の予測値を保存
-            for signal in config.target_signals:
-                train_metrics_best[signal]['predictions'] = np.array(train_preds_epoch[signal])
-                train_metrics_best[signal]['targets'] = np.array(train_targets_epoch[signal])
-            
-            # モデルを保存
-            torch.save({
-                'model_state_dict': model.state_dict(),
-                'epoch': epoch,
-                'best_val_loss': best_val_loss,
-                'model_type': config.model_type,
-                'target_signals': config.target_signals
-            }, save_dir / model_name)
+        if val_loss < best_val_loss:
+            improvement = (best_val_loss - val_loss) / best_val_loss if best_val_loss != float('inf') else 1
+            if improvement > config.min_delta or epoch == 0:  # 初回は必ず保存
+                best_val_loss = val_loss
+                patience_counter = 0
+                model_saved = True
+                
+                # 最良時の予測値を保存
+                for signal in config.target_signals:
+                    train_metrics_best[signal]['predictions'] = np.array(train_preds_epoch[signal])
+                    train_metrics_best[signal]['targets'] = np.array(train_targets_epoch[signal])
+                
+                # モデルを保存
+                torch.save({
+                    'model_state_dict': model.state_dict(),
+                    'epoch': epoch,
+                    'best_val_loss': best_val_loss,
+                    'model_type': config.model_type,
+                    'target_signals': config.target_signals
+                }, save_dir / model_name)
+                
+                if config.verbose:
+                    print(f"      モデル保存 (epoch {epoch+1}, val_loss: {val_loss:.4f})")
+            else:
+                patience_counter += 1
         else:
             patience_counter += 1
         
@@ -1895,9 +1903,24 @@ def train_model_multi(model, train_loader, val_loader, config, fold=None, subjec
                 print(f"    Early stopping at epoch {epoch+1}")
             break
     
-    # ベストモデル読み込み
-    checkpoint = torch.load(save_dir / model_name)
-    model.load_state_dict(checkpoint['model_state_dict'])
+    # ベストモデル読み込み（ファイルが存在する場合のみ）
+    model_path = save_dir / model_name
+    if model_saved and model_path.exists():
+        checkpoint = torch.load(model_path)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        if config.verbose:
+            print(f"    ベストモデルを読み込みました: {model_name}")
+    else:
+        if config.verbose:
+            print(f"    警告: モデルが改善されなかったため、最終エポックのモデルを使用します")
+        # 最後のエポックの予測値を使用
+        for signal in config.target_signals:
+            if len(train_preds_epoch[signal]) > 0:
+                train_metrics_best[signal]['predictions'] = np.array(train_preds_epoch[signal])
+                train_metrics_best[signal]['targets'] = np.array(train_targets_epoch[signal])
+            else:
+                train_metrics_best[signal]['predictions'] = np.array([])
+                train_metrics_best[signal]['targets'] = np.array([])
     
     # メトリクス計算
     train_metrics = {}
@@ -1911,6 +1934,8 @@ def train_model_multi(model, train_loader, val_loader, config, fold=None, subjec
         else:
             mae = float('inf')
             corr = 0.0
+            if config.verbose:
+                print(f"    警告: {signal}の予測値が空です")
         
         train_metrics[signal] = {
             'mae': mae,
