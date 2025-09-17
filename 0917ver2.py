@@ -796,10 +796,10 @@ class PhysNet2DCNN_3D(nn.Module):
     入力: (batch_size, time_frames, height, width, channels)
     出力: (batch_size, time_frames) or (batch_size, time_frames, n_signals)
     """
-    def __init__(self, input_shape=None, output_channels=1):  # output_channelsを追加（デフォルト1）
+    def __init__(self, input_shape=None, output_channels=1):
         super(PhysNet2DCNN_3D, self).__init__()
         
-        self.output_channels = output_channels  # 追加
+        self.output_channels = output_channels
         
         # 入力チャンネル数を動的に設定
         if input_shape is not None:
@@ -814,7 +814,6 @@ class PhysNet2DCNN_3D(nn.Module):
         # 入力サイズに基づいてプーリングサイズを調整
         self.adaptive_pooling = height < 36 or width < 36
         
-        # [元のコードと完全に同じConvBlock構造]
         # ConvBlock 1: 32 filters
         self.conv1_1 = nn.Conv3d(in_channels, 32, kernel_size=(1, 5, 5), padding=(0, 2, 2))
         self.bn1_1 = nn.BatchNorm3d(32, momentum=0.01, eps=1e-5)
@@ -891,8 +890,8 @@ class PhysNet2DCNN_3D(nn.Module):
         # Adaptive Spatial Global Average Pooling
         self.spatial_pool = nn.AdaptiveAvgPool3d((None, 1, 1))
         
-        # Final Conv - 唯一の変更点
-        self.conv_final = nn.Conv3d(64, self.output_channels, kernel_size=1)  # 1 → output_channels
+        # Final Conv
+        self.conv_final = nn.Conv3d(64, self.output_channels, kernel_size=1)
         
         # Dropout
         self.dropout = nn.Dropout(0.2)
@@ -913,16 +912,30 @@ class PhysNet2DCNN_3D(nn.Module):
     
     def forward(self, x):
         """
-        入力: x shape (B, T, H, W, C)
+        入力: x shape (B, T, H, W, C) または (T, H, W, C)
         出力: shape (B, T) or (B, T, output_channels)
         """
-        batch_size = x.size(0)
+        # 入力の次元を確認してバッチ次元を追加（必要な場合）
+        if x.dim() == 4:  # (T, H, W, C) の場合
+            x = x.unsqueeze(0)  # (1, T, H, W, C)
+            batch_size = 1
+            squeeze_batch = True
+        else:  # (B, T, H, W, C) の場合
+            batch_size = x.size(0)
+            squeeze_batch = False
+        
         time_frames = x.size(1)
         
+        # デバッグ情報
+        # print(f"Input shape: {x.shape}")
+        
         # PyTorchのConv3dは (B, C, D, H, W)を期待
+        # xが5次元であることを確認
+        if x.dim() != 5:
+            raise ValueError(f"Expected 5D input (B, T, H, W, C), got {x.dim()}D with shape {x.shape}")
+        
         x = x.permute(0, 4, 1, 2, 3)  # (B, C, T, H, W)
         
-        # [元のコードと完全に同じforward処理]
         # ConvBlock 1
         x = self.conv1_1(x)
         x = self.bn1_1(x)
@@ -986,15 +999,19 @@ class PhysNet2DCNN_3D(nn.Module):
         # Final Conv
         x = self.conv_final(x)
         
-        # 出力を整形 - 複数出力対応の修正
+        # 出力を整形
         if self.output_channels == 1:
-            # 単一出力の場合（元のコードと同じ）
-            x = x.squeeze(1).squeeze(-1).squeeze(-1)
+            # 単一出力の場合
+            x = x.squeeze(1).squeeze(-1).squeeze(-1)  # (B, T)
             
             # 元の時間長に補間
             if x.size(-1) != time_frames:
                 x = F.interpolate(x.unsqueeze(1), size=time_frames, mode='linear', align_corners=False)
                 x = x.squeeze(1)
+            
+            # バッチ次元を削除（必要な場合）
+            if squeeze_batch:
+                x = x.squeeze(0)
         else:
             # 複数出力の場合
             x = x.squeeze(-1).squeeze(-1)  # (B, output_channels, T)
@@ -1005,6 +1022,10 @@ class PhysNet2DCNN_3D(nn.Module):
                 x = x.permute(0, 2, 1)  # (B, output_channels, T)
                 x = F.interpolate(x, size=time_frames, mode='linear', align_corners=False)
                 x = x.permute(0, 2, 1)  # (B, T, output_channels)
+            
+            # バッチ次元を削除（必要な場合）
+            if squeeze_batch:
+                x = x.squeeze(0)
         
         return x
 
