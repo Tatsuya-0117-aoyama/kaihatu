@@ -794,9 +794,9 @@ class PhysNet2DCNN_3D(nn.Module):
         
         # 条件付きプーリング
         if height <= 16 or width <= 16:
-           self.pool2 = nn.AvgPool3d(kernel_size=(1, 1, 1), stride=(1, 1, 1))  # 時間次元を保持
+            self.pool2 = nn.AvgPool3d(kernel_size=(2, 1, 1), stride=(2, 1, 1))
         else:
-           self.pool2 = nn.AvgPool3d(kernel_size=(1, 2, 2), stride=(1, 2, 2))  # 時間次元を保持
+            self.pool2 = nn.AvgPool3d(kernel_size=(2, 2, 2), stride=(2, 2, 2))
         
         # ConvBlock 3: 64 filters
         self.conv3_1 = nn.Conv3d(64, 64, kernel_size=(3, 3, 3), padding=(1, 1, 1))
@@ -807,7 +807,7 @@ class PhysNet2DCNN_3D(nn.Module):
         self.bn3_2 = nn.BatchNorm3d(64, momentum=0.01, eps=1e-5)
         self.elu3_2 = nn.ELU(inplace=True)
         
-        self.pool3 = nn.AvgPool3d(kernel_size=(1, 1, 1), stride=(1, 1, 1))
+        self.pool3 = nn.AvgPool3d(kernel_size=(2, 1, 1), stride=(2, 1, 1))
         
         # ConvBlock 4: 64 filters
         self.conv4_1 = nn.Conv3d(64, 64, kernel_size=(3, 3, 3), padding=(1, 1, 1))
@@ -818,7 +818,7 @@ class PhysNet2DCNN_3D(nn.Module):
         self.bn4_2 = nn.BatchNorm3d(64, momentum=0.01, eps=1e-5)
         self.elu4_2 = nn.ELU(inplace=True)
         
-        self.pool4 = nn.AvgPool3d(kernel_size=(1, 1, 1), stride=(1, 1, 1)) 
+        self.pool4 = nn.AvgPool3d(kernel_size=(2, 1, 1), stride=(2, 1, 1))
         
         # ConvBlock 5: 64 filters with upsampling
         self.conv5_1 = nn.Conv3d(64, 64, kernel_size=(3, 3, 3), padding=(1, 1, 1))
@@ -830,7 +830,7 @@ class PhysNet2DCNN_3D(nn.Module):
         self.elu5_2 = nn.ELU(inplace=True)
         
         # Upsample
-        self.upsample = nn.Upsample(scale_factor=(1, 1, 1), mode='trilinear', align_corners=False)
+        self.upsample = nn.Upsample(scale_factor=(2, 1, 1), mode='trilinear', align_corners=False)
         
         # ConvBlock 6: 64 filters
         self.conv6_1 = nn.Conv3d(64, 64, kernel_size=(1, 3, 3), padding=(0, 1, 1))
