@@ -1652,6 +1652,21 @@ def train_model_multi(model, train_loader, val_loader, config, fold=None, subjec
     fold_str = f"Fold {fold+1}" if fold is not None else ""
     subject_str = f"{subject}" if subject is not None else ""
     
+    # モデル保存先とファイル名を最初に決定
+    if save_dir is None:
+        save_dir = Path(config.save_path)
+        if config.cross_validation_mode == "within_subject" and subject is not None:
+            save_dir = save_dir / subject
+    else:
+        save_dir = Path(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+    
+    # model_nameを最初に定義
+    if fold is not None:
+        model_name = f'best_model_fold{fold+1}.pth'
+    else:
+        model_name = f'best_model_{config.model_type}.pth'
+    
     if config.verbose:
         print(f"\n  学習開始 {subject_str} {fold_str}")
         print(f"    モデル: {config.model_type}")
@@ -1841,20 +1856,7 @@ def train_model_multi(model, train_loader, val_loader, config, fold=None, subjec
                 train_metrics_best[signal]['predictions'] = np.array(train_preds_epoch[signal])
                 train_metrics_best[signal]['targets'] = np.array(train_targets_epoch[signal])
             
-            # モデル保存先の決定
-            if save_dir is None:
-                save_dir = Path(config.save_path)
-                if config.cross_validation_mode == "within_subject" and subject is not None:
-                    save_dir = save_dir / subject
-            else:
-                save_dir = Path(save_dir)
-            save_dir.mkdir(parents=True, exist_ok=True)
-            
-            if fold is not None:
-                model_name = f'best_model_fold{fold+1}.pth'
-            else:
-                model_name = f'best_model_{config.model_type}.pth'
-            
+            # モデルを保存
             torch.save({
                 'model_state_dict': model.state_dict(),
                 'epoch': epoch,
@@ -1903,8 +1905,12 @@ def train_model_multi(model, train_loader, val_loader, config, fold=None, subjec
         preds = train_metrics_best[signal]['predictions']
         targets = train_metrics_best[signal]['targets']
         
-        mae = mean_absolute_error(targets, preds)
-        corr = np.corrcoef(targets, preds)[0, 1] if len(preds) > 1 else 0.0
+        if len(preds) > 0 and len(targets) > 0:
+            mae = mean_absolute_error(targets, preds)
+            corr = np.corrcoef(targets, preds)[0, 1] if len(preds) > 1 else 0.0
+        else:
+            mae = float('inf')
+            corr = 0.0
         
         train_metrics[signal] = {
             'mae': mae,
