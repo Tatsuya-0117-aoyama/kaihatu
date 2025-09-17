@@ -94,7 +94,7 @@ class Config:
         # ================================
         # LAB変換データ使用設定
         # ================================
-        self.use_lab = Falsew
+        self.use_lab = False
         self.lab_filename = "_downsampled_1Hzver2.npy"
         
         # ================================
@@ -203,11 +203,11 @@ class Config:
         
         # 損失関数設定
         self.loss_type = "combined"  # "mse", "combined", "huber_combined"
-        self.loss_alpha = 0.7
-        self.loss_beta = 0.3
+        self.loss_alpha = 0.8
+        self.loss_beta = 0.2
         
         # 学習率スケジューラー設定
-        self.scheduler_type = "cosine"  # "cosine", "onecycle", "plateau"
+        self.scheduler_type = "plateau"  # "cosine", "onecycle", "plateau"
         self.scheduler_T0 = 30
         self.scheduler_T_mult = 2
         
