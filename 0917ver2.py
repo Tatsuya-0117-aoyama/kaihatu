@@ -1234,36 +1234,27 @@ def load_data_single_subject(subject, config):
             lab_data = np.load(lab_path)
             print(f"  LABデータ読み込み成功: {lab_data.shape}")
             
-            # RGBとLABデータの形状を確認
             if rgb_data.shape == lab_data.shape:
-                # RGB+LABデータを結合（チャンネル次元で連結）
                 combined_data = np.concatenate([rgb_data, lab_data], axis=-1)
                 print(f"  RGB+LAB結合データ: {combined_data.shape}")
                 
-                # データの正規化（LABデータも0-1の範囲に）
                 if lab_data.max() > 1.0:
                     combined_data[..., 3:] = combined_data[..., 3:] / 255.0
                 
                 rgb_data = combined_data
             else:
                 print(f"警告: {subject}のRGBとLABデータの形状が一致しません")
-                print(f"  RGB shape: {rgb_data.shape}, LAB shape: {lab_data.shape}")
                 config.use_lab = False
                 config.use_channel = 'RGB'
                 config.num_channels = 3
         else:
-            print(f"警告: {subject}のLABデータが見つかりません: {lab_path}")
-            print(f"  LABデータなしで処理を続行します。")
+            print(f"警告: {subject}のLABデータが見つかりません")
             config.use_lab = False
             config.use_channel = 'RGB'
             config.num_channels = 3
     
-    # データ形状の確認と調整
-    if rgb_data.ndim == 5:  # (N, T, H, W, C)
-        pass
-    elif rgb_data.ndim == 4:  # (N, H, W, C) の場合、時間次元を追加
-        rgb_data = np.expand_dims(rgb_data, axis=1)
-        rgb_data = np.repeat(rgb_data, config.time_frames, axis=1)
+    # ここの処理を修正 - データは既に(T, H, W, C)形式なので何もしない
+    # rgb_dataの形状は (360, H, W, C) のまま使用
     
     # 複数指標の信号データ読み込み
     all_signals_data = []
