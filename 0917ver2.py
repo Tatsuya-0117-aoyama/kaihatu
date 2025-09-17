@@ -791,15 +791,14 @@ class MultiSignalDataset(Dataset):
 # ================================
 class PhysNet2DCNN_3D(nn.Module):
     """
-    CalibrationPhys論文準拠のPhysNet2DCNN（3D畳み込み版）
-    様々な入力サイズに対応（14x16, 36x36など）
-    入力: (batch_size, time_frames, height, width, channels)
-    出力: (batch_size, time_frames) or (batch_size, time_frames, n_signals)
+    デバッグ版PhysNet2DCNN（3D畳み込み版）
+    14×16入力での時間次元問題を調査
     """
-    def __init__(self, input_shape=None, output_channels=1):  # output_channelsを追加（デフォルト1）
+    def __init__(self, input_shape=None, output_channels=1, debug=True):
         super(PhysNet2DCNN_3D, self).__init__()
         
-        self.output_channels = output_channels  # 追加
+        self.output_channels = output_channels
+        self.debug = debug  # デバッグモードフラグ
         
         # 入力チャンネル数を動的に設定
         if input_shape is not None:
@@ -811,10 +810,13 @@ class PhysNet2DCNN_3D(nn.Module):
             height = 36
             width = 36
         
-        # 入力サイズに基づいてプーリングサイズを調整
-        self.adaptive_pooling = height < 36 or width < 36
+        if self.debug:
+            print(f"[INIT] Model initialized with:")
+            print(f"  input_shape: {input_shape}")
+            print(f"  in_channels: {in_channels}")
+            print(f"  height: {height}, width: {width}")
+            print(f"  output_channels: {output_channels}")
         
-        # [元のコードと完全に同じConvBlock構造]
         # ConvBlock 1: 32 filters
         self.conv1_1 = nn.Conv3d(in_channels, 32, kernel_size=(1, 5, 5), padding=(0, 2, 2))
         self.bn1_1 = nn.BatchNorm3d(32, momentum=0.01, eps=1e-5)
@@ -827,8 +829,12 @@ class PhysNet2DCNN_3D(nn.Module):
         # 小さい入力に対応したプーリング
         if height <= 16 or width <= 16:
             self.pool1 = nn.Identity()
+            if self.debug:
+                print(f"  pool1: Identity (small input detected)")
         else:
             self.pool1 = nn.AvgPool3d(kernel_size=(1, 2, 2), stride=(1, 2, 2))
+            if self.debug:
+                print(f"  pool1: AvgPool3d((1,2,2))")
         
         # ConvBlock 2: 64 filters
         self.conv2_1 = nn.Conv3d(32, 64, kernel_size=(3, 3, 3), padding=(1, 1, 1))
@@ -842,8 +848,12 @@ class PhysNet2DCNN_3D(nn.Module):
         # 条件付きプーリング
         if height <= 16 or width <= 16:
             self.pool2 = nn.AvgPool3d(kernel_size=(2, 1, 1), stride=(2, 1, 1))
+            if self.debug:
+                print(f"  pool2: AvgPool3d((2,1,1)) (small input)")
         else:
             self.pool2 = nn.AvgPool3d(kernel_size=(2, 2, 2), stride=(2, 2, 2))
+            if self.debug:
+                print(f"  pool2: AvgPool3d((2,2,2))")
         
         # ConvBlock 3: 64 filters
         self.conv3_1 = nn.Conv3d(64, 64, kernel_size=(3, 3, 3), padding=(1, 1, 1))
@@ -855,6 +865,8 @@ class PhysNet2DCNN_3D(nn.Module):
         self.elu3_2 = nn.ELU(inplace=True)
         
         self.pool3 = nn.AvgPool3d(kernel_size=(2, 1, 1), stride=(2, 1, 1))
+        if self.debug:
+            print(f"  pool3: AvgPool3d((2,1,1))")
         
         # ConvBlock 4: 64 filters
         self.conv4_1 = nn.Conv3d(64, 64, kernel_size=(3, 3, 3), padding=(1, 1, 1))
@@ -866,6 +878,8 @@ class PhysNet2DCNN_3D(nn.Module):
         self.elu4_2 = nn.ELU(inplace=True)
         
         self.pool4 = nn.AvgPool3d(kernel_size=(2, 1, 1), stride=(2, 1, 1))
+        if self.debug:
+            print(f"  pool4: AvgPool3d((2,1,1))")
         
         # ConvBlock 5: 64 filters with upsampling
         self.conv5_1 = nn.Conv3d(64, 64, kernel_size=(3, 3, 3), padding=(1, 1, 1))
@@ -878,6 +892,8 @@ class PhysNet2DCNN_3D(nn.Module):
         
         # Upsample
         self.upsample = nn.Upsample(scale_factor=(2, 1, 1), mode='trilinear', align_corners=False)
+        if self.debug:
+            print(f"  upsample: scale_factor=(2,1,1)")
         
         # ConvBlock 6: 64 filters
         self.conv6_1 = nn.Conv3d(64, 64, kernel_size=(1, 3, 3), padding=(0, 1, 1))
@@ -890,15 +906,22 @@ class PhysNet2DCNN_3D(nn.Module):
         
         # Adaptive Spatial Global Average Pooling
         self.spatial_pool = nn.AdaptiveAvgPool3d((None, 1, 1))
+        if self.debug:
+            print(f"  spatial_pool: AdaptiveAvgPool3d((None,1,1))")
         
-        # Final Conv - 唯一の変更点
-        self.conv_final = nn.Conv3d(64, self.output_channels, kernel_size=1)  # 1 → output_channels
+        # Final Conv
+        self.conv_final = nn.Conv3d(64, self.output_channels, kernel_size=1)
+        if self.debug:
+            print(f"  conv_final: Conv3d(64, {self.output_channels}, kernel_size=1)")
         
         # Dropout
         self.dropout = nn.Dropout(0.2)
         
         # 重み初期化
         self._initialize_weights()
+        
+        # デバッグ用：手動プーリングフラグ
+        self.use_manual_pooling = False
     
     def _initialize_weights(self):
         """He初期化で重みを初期化"""
@@ -918,11 +941,19 @@ class PhysNet2DCNN_3D(nn.Module):
         """
         batch_size = x.size(0)
         time_frames = x.size(1)
+        actual_height = x.size(2)
+        actual_width = x.size(3)
+        
+        if self.debug:
+            print(f"\n[FORWARD] Input shape: {x.shape}")
+            print(f"  Batch: {batch_size}, Time: {time_frames}")
+            print(f"  Height: {actual_height}, Width: {actual_width}")
         
         # PyTorchのConv3dは (B, C, D, H, W)を期待
         x = x.permute(0, 4, 1, 2, 3)  # (B, C, T, H, W)
+        if self.debug:
+            print(f"After permute: {x.shape}")
         
-        # [元のコードと完全に同じforward処理]
         # ConvBlock 1
         x = self.conv1_1(x)
         x = self.bn1_1(x)
@@ -932,6 +963,8 @@ class PhysNet2DCNN_3D(nn.Module):
         x = self.elu1_2(x)
         x = self.pool1(x)
         x = self.dropout(x)
+        if self.debug:
+            print(f"After ConvBlock1: {x.shape}")
         
         # ConvBlock 2
         x = self.conv2_1(x)
@@ -942,6 +975,8 @@ class PhysNet2DCNN_3D(nn.Module):
         x = self.elu2_2(x)
         x = self.pool2(x)
         x = self.dropout(x)
+        if self.debug:
+            print(f"After ConvBlock2: {x.shape}")
         
         # ConvBlock 3
         x = self.conv3_1(x)
@@ -952,6 +987,8 @@ class PhysNet2DCNN_3D(nn.Module):
         x = self.elu3_2(x)
         x = self.pool3(x)
         x = self.dropout(x)
+        if self.debug:
+            print(f"After ConvBlock3: {x.shape}")
         
         # ConvBlock 4
         x = self.conv4_1(x)
@@ -962,6 +999,8 @@ class PhysNet2DCNN_3D(nn.Module):
         x = self.elu4_2(x)
         x = self.pool4(x)
         x = self.dropout(x)
+        if self.debug:
+            print(f"After ConvBlock4: {x.shape}")
         
         # ConvBlock 5
         x = self.conv5_1(x)
@@ -970,7 +1009,11 @@ class PhysNet2DCNN_3D(nn.Module):
         x = self.conv5_2(x)
         x = self.bn5_2(x)
         x = self.elu5_2(x)
+        if self.debug:
+            print(f"Before upsample: {x.shape}")
         x = self.upsample(x)
+        if self.debug:
+            print(f"After upsample: {x.shape}")
         
         # ConvBlock 6
         x = self.conv6_1(x)
@@ -979,32 +1022,59 @@ class PhysNet2DCNN_3D(nn.Module):
         x = self.conv6_2(x)
         x = self.bn6_2(x)
         x = self.elu6_2(x)
+        if self.debug:
+            print(f"Before spatial_pool: {x.shape}")
         
         # Spatial Global Average Pooling
-        x = self.spatial_pool(x)
+        if self.use_manual_pooling:
+            # 手動実装版
+            B, C, T, H, W = x.shape
+            x = x.mean(dim=[3, 4], keepdim=True)
+            if self.debug:
+                print(f"After manual spatial pooling: {x.shape}")
+        else:
+            # AdaptiveAvgPool3d版
+            x = self.spatial_pool(x)
+            if self.debug:
+                print(f"After adaptive spatial_pool: {x.shape}")
         
         # Final Conv
         x = self.conv_final(x)
+        if self.debug:
+            print(f"After conv_final: {x.shape}")
         
-        # 出力を整形 - 複数出力対応の修正
+        # 出力を整形 - 複数出力対応
         if self.output_channels == 1:
-            # 単一出力の場合（元のコードと同じ）
+            # 単一出力の場合
             x = x.squeeze(1).squeeze(-1).squeeze(-1)
+            if self.debug:
+                print(f"After squeeze (single output): {x.shape}")
             
             # 元の時間長に補間
-            if x.size(-1) != time_frames:
+            if x.dim() > 0 and x.size(-1) != time_frames:
+                if self.debug:
+                    print(f"Interpolating from {x.size(-1)} to {time_frames} frames")
                 x = F.interpolate(x.unsqueeze(1), size=time_frames, mode='linear', align_corners=False)
                 x = x.squeeze(1)
         else:
             # 複数出力の場合
             x = x.squeeze(-1).squeeze(-1)  # (B, output_channels, T)
             x = x.permute(0, 2, 1)  # (B, T, output_channels)
+            if self.debug:
+                print(f"After reshape (multi output): {x.shape}")
             
             # 元の時間長に補間
             if x.size(1) != time_frames:
+                if self.debug:
+                    print(f"Interpolating from {x.size(1)} to {time_frames} frames")
                 x = x.permute(0, 2, 1)  # (B, output_channels, T)
                 x = F.interpolate(x, size=time_frames, mode='linear', align_corners=False)
                 x = x.permute(0, 2, 1)  # (B, T, output_channels)
+        
+        if self.debug:
+            print(f"Final output: {x.shape}")
+            print(f"Expected: ({batch_size}, {time_frames}" + 
+                  (f", {self.output_channels})" if self.output_channels > 1 else ")")
         
         return x
 
