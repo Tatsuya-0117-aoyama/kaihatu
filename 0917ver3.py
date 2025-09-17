@@ -1193,14 +1193,14 @@ def create_model(config):
 def load_data_single_subject(subject, config):
     """単一被験者のデータを読み込み（LABデータ対応、現在の指標用）"""
     
-    # すべてのモデルで同じRGBデータファイルを使用
+    # RGBデータの読み込み
     rgb_path = os.path.join(config.rgb_base_path, subject, 
                             f"{subject}_downsampled_1Hz.npy")
     if not os.path.exists(rgb_path):
         print(f"警告: {subject}のRGBデータが見つかりません: {rgb_path}")
         return None, None
     
-    rgb_data = np.load(rgb_path)  # Shape: (360, 14, 16, 3)
+    rgb_data = np.load(rgb_path)
     
     # データのリサイズ（14x16 → 36x36）
     resized_rgb = np.zeros((rgb_data.shape[0], 36, 36, rgb_data.shape[-1]))
@@ -1237,7 +1237,7 @@ def load_data_single_subject(subject, config):
                 
                 rgb_data = combined_data
     
-    # 信号データの読み込み（現在の指標）
+    # 信号データの読み込み
     signal_data_list = []
     for task in config.tasks:
         # Cross-Subjectモードでは現在の指標を使用
@@ -1259,8 +1259,10 @@ def load_data_single_subject(subject, config):
             return None, None
         signal_data_list.append(np.load(signal_path))
     
+    # ここで signal_data を定義（重要！）
     signal_data = np.concatenate(signal_data_list)
     
+    # 信号データの正規化（signal_dataが定義された後）
     if config.signal_normalization != 'none':
         if config.signal_norm_per_subject:
             # 被験者ごとの正規化
@@ -1280,8 +1282,8 @@ def load_data_single_subject(subject, config):
                     print(f"    元の平均: {norm_params['mean']:.3f}, 標準偏差: {norm_params['std']:.3f}")
                 elif config.signal_normalization == 'robust':
                     print(f"    元の中央値: {norm_params['median']:.3f}, IQR: {norm_params['iqr']:.3f}")
-
-    # データの正規化（0-1の範囲に）
+    
+    # データの正規化（RGBは0-1の範囲に）
     if rgb_data[..., :3].max() > 1.0:  # RGBチャンネルのみチェック
         rgb_data[..., :3] = rgb_data[..., :3] / 255.0
     
