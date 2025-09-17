@@ -1248,7 +1248,10 @@ def load_all_subjects_data(config):
 # 全被験者5分割交差検証
 # ================================
 def create_stratified_folds(all_subject_task_info, n_folds=5, random_seed=42):
-    """各foldの訓練データに全被験者が最低1タスク含まれるように層化分割"""
+    """
+    5分割交差検証のfoldを作成
+    制約：各foldの訓練データに全32被験者から最低1タスク含める
+    """
     np.random.seed(random_seed)
     
     # 被験者ごとにタスクをグループ化
@@ -1258,23 +1261,100 @@ def create_stratified_folds(all_subject_task_info, n_folds=5, random_seed=42):
             subject_tasks[subj_idx] = []
         subject_tasks[subj_idx].append(idx)
     
-    # 各foldの初期化
-    folds = [[] for _ in range(n_folds)]
+    n_subjects = len(subject_tasks)
+    n_total_tasks = len(all_subject_task_info)
+    fold_size = n_total_tasks // n_folds  # 各foldのテストデータサイズ（約38）
     
-    # 各被験者からタスクを各foldに配分
+    # 各foldのテストデータインデックスを保存
+    test_folds = [[] for _ in range(n_folds)]
+    
+    # 各被験者のタスクを各foldに配分
     for subj_idx, task_indices in subject_tasks.items():
         np.random.shuffle(task_indices)
+        n_tasks = len(task_indices)
         
-        # 各foldに均等に配分
-        for i, task_idx in enumerate(task_indices):
-            fold_idx = i % n_folds
-            folds[fold_idx].append(task_idx)
+        if n_tasks >= n_folds:
+            # タスクが5個以上ある場合、各foldに均等に配分
+            for fold_idx in range(n_folds):
+                # 各foldに最低1つは配分
+                start_idx = fold_idx * n_tasks // n_folds
+                end_idx = (fold_idx + 1) * n_tasks // n_folds
+                test_folds[fold_idx].extend(task_indices[start_idx:end_idx])
+        else:
+            # タスクが5個未満の場合、ランダムに配分
+            fold_assignments = np.random.choice(n_folds, n_tasks, replace=False)
+            for task_idx, fold_idx in zip(task_indices, fold_assignments):
+                test_folds[fold_idx].append(task_idx)
     
-    # 各foldをシャッフル
-    for fold in folds:
-        np.random.shuffle(fold)
+    # 各foldのサイズを調整（約38タスクになるように）
+    adjusted_folds = []
+    for fold_idx in range(n_folds):
+        current_fold = test_folds[fold_idx]
+        
+        if len(current_fold) > fold_size:
+            # 多すぎる場合は削減
+            np.random.shuffle(current_fold)
+            current_fold = current_fold[:fold_size]
+        elif len(current_fold) < fold_size:
+            # 少ない場合は他のタスクから補充
+            # ただし、訓練データに全被験者が含まれることを保証する必要がある
+            all_indices = set(range(n_total_tasks))
+            used_indices = set()
+            for f in test_folds:
+                used_indices.update(f)
+            available_indices = list(all_indices - used_indices)
+            
+            if available_indices:
+                np.random.shuffle(available_indices)
+                n_needed = min(fold_size - len(current_fold), len(available_indices))
+                current_fold.extend(available_indices[:n_needed])
+        
+        adjusted_folds.append(current_fold)
     
-    return folds
+    # 検証：各foldの訓練データに全被験者が含まれることを確認
+    print("\n5分割交差検証 - Fold構成確認:")
+    for fold_idx, test_indices in enumerate(adjusted_folds):
+        # このfoldのテストデータ
+        test_subjects = set()
+        for idx in test_indices:
+            subj_idx, _ = all_subject_task_info[idx]
+            test_subjects.add(subj_idx)
+        
+        # このfoldの訓練データ
+        train_indices = []
+        for i, fold in enumerate(adjusted_folds):
+            if i != fold_idx:
+                train_indices.extend(fold)
+        
+        train_subjects = set()
+        for idx in range(n_total_tasks):
+            if idx not in test_indices:
+                subj_idx, _ = all_subject_task_info[idx]
+                train_subjects.add(subj_idx)
+        
+        print(f"  Fold {fold_idx+1}:")
+        print(f"    テストデータ: {len(test_indices)}タスク, {len(test_subjects)}人の被験者")
+        print(f"    訓練データ: {n_total_tasks - len(test_indices)}タスク, {len(train_subjects)}人の被験者")
+        
+        # 訓練データに含まれない被験者をチェック
+        missing_subjects = set(range(n_subjects)) - train_subjects
+        if missing_subjects:
+            print(f"    警告: 訓練データに含まれない被験者: {missing_subjects}")
+            
+            # 修正：訓練データに全被験者を含めるように調整
+            for missing_subj in missing_subjects:
+                # この被験者のタスクから1つを訓練データに移動
+                subj_task_indices = subject_tasks[missing_subj]
+                for task_idx in subj_task_indices:
+                    if task_idx in test_indices:
+                        # テストデータから削除
+                        test_indices.remove(task_idx)
+                        break
+            
+            adjusted_folds[fold_idx] = test_indices
+            print(f"    修正後テストデータ: {len(test_indices)}タスク")
+    
+    return adjusted_folds
 
 def all_subjects_cross_validation(config):
     """全被験者5分割交差検証"""
@@ -1287,7 +1367,7 @@ def all_subjects_cross_validation(config):
     # 層化5分割を作成
     folds = create_stratified_folds(all_subject_task_info, config.n_folds_all_subjects, config.random_seed)
     
-    # 分割情報を保存
+    # 分割情報を詳細に保存
     save_dir = Path(config.save_path)
     save_dir.mkdir(parents=True, exist_ok=True)
     
@@ -1295,24 +1375,72 @@ def all_subjects_cross_validation(config):
         f.write("="*60 + "\n")
         f.write("全被験者5分割交差検証 - データ分割情報\n")
         f.write("="*60 + "\n\n")
+        f.write(f"総タスク数: {len(all_subject_task_info)}\n")
+        f.write(f"総被験者数: {len(config.subjects)}\n")
+        f.write(f"Fold数: {config.n_folds_all_subjects}\n\n")
         
-        for fold_idx, fold_indices in enumerate(folds):
-            f.write(f"Fold {fold_idx+1}: {len(fold_indices)}タスク\n")
+        for fold_idx, test_indices in enumerate(folds):
+            f.write(f"{'='*40}\n")
+            f.write(f"Fold {fold_idx+1}\n")
+            f.write(f"{'='*40}\n")
             
-            # 被験者ごとのタスク数を集計
-            subject_counts = {}
-            for idx in fold_indices:
+            # テストデータの詳細
+            f.write(f"テストデータ: {len(test_indices)}タスク\n")
+            test_subject_tasks = {}
+            for idx in test_indices:
                 subj_idx, task_idx = all_subject_task_info[idx]
                 subj_name = config.subjects[subj_idx]
                 task_name = config.tasks[task_idx]
                 
-                if subj_name not in subject_counts:
-                    subject_counts[subj_name] = []
-                subject_counts[subj_name].append(task_name)
+                if subj_name not in test_subject_tasks:
+                    test_subject_tasks[subj_name] = []
+                test_subject_tasks[subj_name].append(task_name)
             
-            f.write(f"  含まれる被験者数: {len(subject_counts)}\n")
-            for subj, tasks in sorted(subject_counts.items()):
+            f.write(f"  含まれる被験者数: {len(test_subject_tasks)}\n")
+            for subj, tasks in sorted(test_subject_tasks.items()):
                 f.write(f"    {subj}: {tasks}\n")
+            
+            # 訓練データの詳細
+            train_indices = [i for i in range(len(all_subject_task_info)) if i not in test_indices]
+            f.write(f"\n訓練データ: {len(train_indices)}タスク\n")
+            
+            train_subject_tasks = {}
+            for idx in train_indices:
+                subj_idx, task_idx = all_subject_task_info[idx]
+                subj_name = config.subjects[subj_idx]
+                task_name = config.tasks[task_idx]
+                
+                if subj_name not in train_subject_tasks:
+                    train_subject_tasks[subj_name] = []
+                train_subject_tasks[subj_name].append(task_name)
+            
+            f.write(f"  含まれる被験者数: {len(train_subject_tasks)}\n")
+            
+            # 各被験者のタスク数を集計
+            subject_task_counts = {}
+            for subj in sorted(train_subject_tasks.keys()):
+                subject_task_counts[subj] = len(train_subject_tasks[subj])
+            
+            # タスク数でソート
+            sorted_subjects = sorted(subject_task_counts.items(), key=lambda x: x[1])
+            
+            f.write(f"  被験者別タスク数:\n")
+            for subj, count in sorted_subjects:
+                f.write(f"    {subj}: {count}タスク {train_subject_tasks[subj]}\n")
+            
+            # 統計情報
+            f.write(f"\n  統計:\n")
+            f.write(f"    最小タスク数/被験者: {min(subject_task_counts.values())}\n")
+            f.write(f"    最大タスク数/被験者: {max(subject_task_counts.values())}\n")
+            f.write(f"    平均タスク数/被験者: {np.mean(list(subject_task_counts.values())):.2f}\n")
+            
+            # 全被験者が含まれているか確認
+            missing_subjects = set(config.subjects) - set(train_subject_tasks.keys())
+            if missing_subjects:
+                f.write(f"  警告: 訓練データに含まれない被験者: {missing_subjects}\n")
+            else:
+                f.write(f"  ✓ 全{len(config.subjects)}人の被験者が訓練データに含まれています\n")
+            
             f.write("\n")
     
     # DataLoader用のワーカー初期化関数
