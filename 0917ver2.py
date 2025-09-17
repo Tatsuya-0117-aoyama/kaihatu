@@ -1222,7 +1222,7 @@ def load_data_single_subject(subject, config):
         print(f"警告: {subject}のRGBデータが見つかりません: {rgb_path}")
         return None, None
     
-    rgb_data = np.load(rgb_path)  # Shape: (360, 14, 16, 3)
+    rgb_data = np.load(rgb_path)  # Shape: (360, 14, 16, 3) = (T, H, W, C)
     print(f"  RGBデータ読み込み成功: {rgb_data.shape}")
     
     # LABデータの読み込み（オプション）
@@ -1258,12 +1258,11 @@ def load_data_single_subject(subject, config):
             config.use_channel = 'RGB'
             config.num_channels = 3
     
-    # データ形状の確認と調整
-    if rgb_data.ndim == 5:  # (N, T, H, W, C)
-        pass
-    elif rgb_data.ndim == 4:  # (N, H, W, C) の場合、時間次元を追加
-        rgb_data = np.expand_dims(rgb_data, axis=1)
-        rgb_data = np.repeat(rgb_data, config.time_frames, axis=1)
+    # ========================================
+    # 修正部分：データ形状の確認と調整を削除
+    # ========================================
+    # rgb_dataは既に(360, H, W, C)の形状なので、追加の次元調整は不要
+    # 元のコードではここで誤って次元を追加していた
     
     # 複数指標の信号データ読み込み
     all_signals_data = []
