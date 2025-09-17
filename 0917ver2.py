@@ -743,27 +743,46 @@ class MultiSignalDataset(Dataset):
         return len(self.rgb_data)
     
     def __getitem__(self, idx):
+        # 元データを取得
         rgb = self.rgb_data_raw[idx]
         signal = self.signal_data_raw[idx]
         
+        # データ拡張を適用（学習時のみ）
         if self.augmentation and self.is_training:
             rgb, signal = self.augmentation.apply_augmentation(rgb, signal, self.is_training)
         
+        # チャンネル選択
         rgb = select_channels(rgb, self.use_channel)
         
+        # ========================================
+        # 元コードに合わせた修正部分
+        # ========================================
+        # Tensorに変換
         rgb_tensor = torch.FloatTensor(rgb)
-        signal_tensor = torch.FloatTensor(signal)
+        signal_tensor = torch.FloatTensor(signal if isinstance(signal, np.ndarray) else [signal])
         
-        # 次元調整
+        # 次元調整（元コードと同じロジック）
         if signal_tensor.dim() == 0:
-            signal_tensor = signal_tensor.unsqueeze(0).unsqueeze(0)
+            signal_tensor = signal_tensor.unsqueeze(0)
+        
+        # 単一値を時間次元に拡張
+        if signal_tensor.size(0) == 1 and rgb_tensor.size(0) > 1:
+            signal_tensor = signal_tensor.repeat(rgb_tensor.size(0))
+        
+        # 複数指標の場合の追加処理
         elif signal_tensor.dim() == 1:
-            if len(signal_tensor) == rgb_tensor.size(0):
-                # 時間次元
-                signal_tensor = signal_tensor.unsqueeze(1)
-            else:
-                # 複数指標
+            # 複数指標で時間次元がない場合
+            if len(signal_tensor) != rgb_tensor.size(0):
+                # 複数指標を時間次元に拡張
                 signal_tensor = signal_tensor.unsqueeze(0).repeat(rgb_tensor.size(0), 1)
+            else:
+                # 時間次元のみの場合は最後に次元追加
+                signal_tensor = signal_tensor.unsqueeze(1)
+        
+        # 3次元データ（時間×指標）の場合はそのまま
+        elif signal_tensor.dim() == 2:
+            # (T, n_signals) の形状を維持
+            pass
         
         return rgb_tensor, signal_tensor
 
