@@ -75,7 +75,7 @@ class Config:
         # ================================
         # "single": 単一指標推定
         # "multi": 複数指標同時推定
-        self.estimation_mode = "multi"
+        self.estimation_mode = "single"
         
         # ================================
         # 推定する指標の選択
