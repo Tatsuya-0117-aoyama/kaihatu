@@ -1524,6 +1524,15 @@ def train_model(model, train_loader, val_loader, config, fold=None, signal_norma
         )
         scheduler_per_batch = False
     
+    # 保存先ディレクトリを最初に定義
+    if config.model_mode == 'cross_subject':
+        save_dir = Path(config.save_path) / config.current_signal_type / f'fold{fold+1}'
+    else:
+        save_dir = Path(config.save_path) / 'models'
+    save_dir.mkdir(parents=True, exist_ok=True)
+    
+    model_name = f'best_model_fold{fold+1}.pth' if fold is not None else 'best_model.pth'
+    
     best_val_loss = float('inf')
     patience_counter = 0
     train_preds_best = None
@@ -1673,14 +1682,7 @@ def train_model(model, train_loader, val_loader, config, fold=None, signal_norma
                 train_preds_best = np.array(train_preds_all)
                 train_targets_best = np.array(train_targets_all)
             
-            # モデル保存先を決定
-            if config.model_mode == 'cross_subject':
-                save_dir = Path(config.save_path) / config.current_signal_type / f'fold{fold+1}'
-            else:
-                save_dir = Path(config.save_path) / 'models'
-            save_dir.mkdir(parents=True, exist_ok=True)
-            
-            model_name = f'best_model_fold{fold+1}.pth' if fold is not None else 'best_model.pth'
+            # モデル保存
             torch.save({
                 'model_state_dict': model.state_dict(),
                 'epoch': epoch,
@@ -1691,7 +1693,7 @@ def train_model(model, train_loader, val_loader, config, fold=None, signal_norma
             
             # 信号正規化器も保存
             if signal_normalizer is not None:
-                normalizer_path = save_dir / f'signal_normalizer_fold{fold+1}.pkl'
+                normalizer_path = save_dir / f'signal_normalizer_fold{fold+1}.pkl' if fold is not None else save_dir / 'signal_normalizer.pkl'
                 signal_normalizer.save(normalizer_path)
         else:
             patience_counter += 1
@@ -1711,11 +1713,12 @@ def train_model(model, train_loader, val_loader, config, fold=None, signal_norma
             break
     
     # ベストモデル読み込み
-    checkpoint = torch.load(save_dir / model_name)
-    model.load_state_dict(checkpoint['model_state_dict'])
+    if os.path.exists(save_dir / model_name):
+        checkpoint = torch.load(save_dir / model_name, weights_only=False)
+        model.load_state_dict(checkpoint['model_state_dict'])
     
     return model, train_preds_best, train_targets_best, train_losses, val_losses
-
+    
 # ================================
 # 評価関数
 # ================================
