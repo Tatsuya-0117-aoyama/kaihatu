@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
-from torch.cuda.amp import GradScaler, autocast  # AMP用
+from torch.cuda.amp import autocast  # AMP用
 import matplotlib.pyplot as plt
 import matplotlib as mpl
 from sklearn.metrics import mean_absolute_error
@@ -18,6 +18,7 @@ from datetime import datetime
 import warnings
 import random
 import pandas as pd
+from torch.amp import autocast
 warnings.filterwarnings('ignore')
 
 # フォント設定（メイリオ）
