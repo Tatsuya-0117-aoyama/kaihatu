@@ -1191,16 +1191,16 @@ def create_model(config):
 # データ読み込み関数（複数指標対応）
 # ================================
 def load_data_single_subject(subject, config):
-    """単一被験者のデータを読み込み（現在の指標用）"""
+    """単一被験者のデータを読み込み（LABデータ対応、現在の指標用）"""
     
-    # RGBデータの読み込み（共通）
+    # すべてのモデルで同じRGBデータファイルを使用
     rgb_path = os.path.join(config.rgb_base_path, subject, 
                             f"{subject}_downsampled_1Hz.npy")
     if not os.path.exists(rgb_path):
         print(f"警告: {subject}のRGBデータが見つかりません: {rgb_path}")
         return None, None
     
-    rgb_data = np.load(rgb_path)
+    rgb_data = np.load(rgb_path)  # Shape: (360, 14, 16, 3)
     
     # データのリサイズ（14x16 → 36x36）
     resized_rgb = np.zeros((rgb_data.shape[0], 36, 36, rgb_data.shape[-1]))
@@ -1214,8 +1214,15 @@ def load_data_single_subject(subject, config):
         lab_path = os.path.join(config.rgb_base_path, subject, 
                                 f"{subject}_downsampled_1Hzver2.npy")
         
-        if os.path.exists(lab_path):
+        if not os.path.exists(lab_path):
+            print(f"警告: {subject}のLABデータが見つかりません: {lab_path}")
+            print(f"  LABデータなしで処理を続行します。")
+            config.use_lab = False
+            config.use_channel = 'RGB'
+            config.num_channels = 3
+        else:
             lab_data = np.load(lab_path)
+            # LABデータもリサイズ
             resized_lab = np.zeros((lab_data.shape[0], 36, 36, lab_data.shape[-1]))
             for i in range(lab_data.shape[0]):
                 for c in range(lab_data.shape[-1]):
@@ -1224,18 +1231,31 @@ def load_data_single_subject(subject, config):
             
             if rgb_data.shape == lab_data.shape:
                 combined_data = np.concatenate([rgb_data, lab_data], axis=-1)
+                
                 if lab_data.max() > 1.0:
                     combined_data[..., 3:] = combined_data[..., 3:] / 255.0
+                
                 rgb_data = combined_data
     
     # 信号データの読み込み（現在の指標）
     signal_data_list = []
     for task in config.tasks:
-        signal_path = os.path.join(config.signal_base_path, subject, 
-                                  config.current_signal_type,  # 現在の指標を使用
-                                  f"{config.current_signal_prefix}_{task}.npy")
+        # Cross-Subjectモードでは現在の指標を使用
+        if config.model_mode == 'cross_subject':
+            signal_path = os.path.join(config.signal_base_path, subject, 
+                                      config.current_signal_type, 
+                                      f"{config.current_signal_prefix}_{task}.npy")
+        else:
+            # Within-Subjectモードでは従来通り
+            signal_path = os.path.join(config.signal_base_path, subject, 
+                                      config.signal_type, 
+                                      f"{config.signal_prefix}_{task}.npy")
+        
         if not os.path.exists(signal_path):
-            print(f"警告: {subject}の{task}の{config.current_signal_type}データが見つかりません")
+            if config.model_mode == 'cross_subject':
+                print(f"警告: {subject}の{task}の{config.current_signal_type}データが見つかりません")
+            else:
+                print(f"警告: {subject}の{task}の{config.signal_type}データが見つかりません")
             return None, None
         signal_data_list.append(np.load(signal_path))
     
@@ -1260,8 +1280,9 @@ def load_data_single_subject(subject, config):
                     print(f"    元の平均: {norm_params['mean']:.3f}, 標準偏差: {norm_params['std']:.3f}")
                 elif config.signal_normalization == 'robust':
                     print(f"    元の中央値: {norm_params['median']:.3f}, IQR: {norm_params['iqr']:.3f}")
-    # データの正規化
-    if rgb_data[..., :3].max() > 1.0:
+
+    # データの正規化（0-1の範囲に）
+    if rgb_data[..., :3].max() > 1.0:  # RGBチャンネルのみチェック
         rgb_data[..., :3] = rgb_data[..., :3] / 255.0
     
     return rgb_data, signal_data
