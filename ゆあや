@@ -1,0 +1,384 @@
+# ================================
+# プロット関数（Cross-Subject用）- 元スケール表示版
+# ================================
+def plot_fold_results_cross_subject(result, fold_dir, config):
+    """各Foldの結果をプロット（Cross-Subject用・元スケール表示）"""
+    fold = result['fold']
+    
+    # 常に元スケールのデータを使用
+    if 'train_predictions_denorm' in result:
+        train_preds_flat = result['train_predictions_denorm'].flatten()
+        train_targets_flat = result['train_targets_denorm'].flatten()
+        test_preds_flat = result['test_predictions_denorm'].flatten()
+        test_targets_flat = result['test_targets_denorm'].flatten()
+        mae_train = result['train_mae_original']
+        mae_test = result['test_mae_original']
+    else:
+        train_preds_flat = result['train_predictions'].flatten()
+        train_targets_flat = result['train_targets'].flatten()
+        test_preds_flat = result['test_predictions'].flatten()
+        test_targets_flat = result['test_targets'].flatten()
+        mae_train = result['train_mae']
+        mae_test = result['test_mae']
+    
+    # 訓練データ散布図
+    plt.figure(figsize=(10, 8))
+    plt.scatter(train_targets_flat, train_preds_flat, 
+                alpha=0.3, s=5, color='blue')
+    min_val = min(train_targets_flat.min(), train_preds_flat.min())
+    max_val = max(train_targets_flat.max(), train_preds_flat.max())
+    plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2)
+    plt.xlabel('真値（元スケール）')
+    plt.ylabel('予測値（元スケール）')
+    plt.title(f"Fold {fold} 訓練データ - MAE: {mae_train:.3f}, Corr: {result['train_corr']:.3f}")
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(fold_dir / f'train_scatter.png', dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    # テストデータ散布図（色分け）
+    plt.figure(figsize=(10, 8))
+    plt.scatter(test_targets_flat, test_preds_flat, 
+                alpha=0.3, s=5, color=config.fold_colors[fold])
+    min_val = min(test_targets_flat.min(), test_preds_flat.min())
+    max_val = max(test_targets_flat.max(), test_preds_flat.max())
+    plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2)
+    plt.xlabel('真値（元スケール）')
+    plt.ylabel('予測値（元スケール）')
+    plt.title(f"Fold {fold} テストデータ - MAE: {mae_test:.3f}, Corr: {result['test_corr']:.3f}")
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(fold_dir / f'test_scatter.png', dpi=150, bbox_inches='tight')
+    plt.close()
+
+def plot_all_folds_summary(fold_results, save_dir, config):
+    """全Foldの結果を統合してプロット（元スケール表示）"""
+    
+    # 元スケールのデータを使用
+    if 'train_predictions_denorm' in fold_results[0]:
+        train_data_key = 'train_predictions_denorm'
+        train_target_key = 'train_targets_denorm'
+        test_data_key = 'test_predictions_denorm'
+        test_target_key = 'test_targets_denorm'
+        train_mae_key = 'train_mae_original'
+        test_mae_key = 'test_mae_original'
+    else:
+        train_data_key = 'train_predictions'
+        train_target_key = 'train_targets'
+        test_data_key = 'test_predictions'
+        test_target_key = 'test_targets'
+        train_mae_key = 'train_mae'
+        test_mae_key = 'test_mae'
+    
+    # 訓練データ統合プロット
+    plt.figure(figsize=(12, 10))
+    for result in fold_results:
+        fold = result['fold']
+        train_preds_flat = result[train_data_key].flatten()
+        train_targets_flat = result[train_target_key].flatten()
+        
+        plt.scatter(train_targets_flat, train_preds_flat, 
+                   alpha=0.2, s=3, color=config.fold_colors[fold],
+                   label=f'Fold {fold}')
+    
+    # 全データの範囲で対角線
+    all_train_targets = np.concatenate([r[train_target_key].flatten() for r in fold_results])
+    all_train_preds = np.concatenate([r[train_data_key].flatten() for r in fold_results])
+    min_val = min(all_train_targets.min(), all_train_preds.min())
+    max_val = max(all_train_targets.max(), all_train_preds.max())
+    plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2)
+    
+    plt.xlabel('真値（元スケール）')
+    plt.ylabel('予測値（元スケール）')
+    
+    avg_train_mae = np.mean([r[train_mae_key] for r in fold_results])
+    avg_train_corr = np.mean([r['train_corr'] for r in fold_results])
+    plt.title(f'全Fold 訓練データ - 平均MAE: {avg_train_mae:.3f}, 平均Corr: {avg_train_corr:.3f}')
+    
+    plt.legend(loc='upper left')
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(save_dir / 'all_folds_train_scatter.png', dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    # テストデータ統合プロット
+    plt.figure(figsize=(12, 10))
+    for result in fold_results:
+        fold = result['fold']
+        test_preds_flat = result[test_data_key].flatten()
+        test_targets_flat = result[test_target_key].flatten()
+        
+        plt.scatter(test_targets_flat, test_preds_flat, 
+                   alpha=0.3, s=5, color=config.fold_colors[fold],
+                   label=f'Fold {fold}')
+    
+    # 全データの範囲で対角線
+    all_test_targets = np.concatenate([r[test_target_key].flatten() for r in fold_results])
+    all_test_preds = np.concatenate([r[test_data_key].flatten() for r in fold_results])
+    min_val = min(all_test_targets.min(), all_test_preds.min())
+    max_val = max(all_test_targets.max(), all_test_preds.max())
+    plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2)
+    
+    plt.xlabel('真値（元スケール）')
+    plt.ylabel('予測値（元スケール）')
+    
+    avg_test_mae = np.mean([r[test_mae_key] for r in fold_results])
+    avg_test_corr = np.mean([r['test_corr'] for r in fold_results])
+    plt.title(f'全Fold テストデータ - 平均MAE: {avg_test_mae:.3f}, 平均Corr: {avg_test_corr:.3f}')
+    
+    plt.legend(loc='upper left')
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(save_dir / 'all_folds_test_scatter.png', dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    # パフォーマンス比較棒グラフ
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+    
+    folds = [f"Fold {r['fold']}" for r in fold_results]
+    mae_values = [r[test_mae_key] for r in fold_results]
+    corr_values = [r['test_corr'] for r in fold_results]
+    colors_list = [config.fold_colors[i+1] for i in range(len(fold_results))]
+    
+    # MAE（元スケール）
+    bars1 = ax1.bar(folds, mae_values, color=colors_list)
+    ax1.axhline(y=np.mean(mae_values), color='r', linestyle='--', 
+                label=f'平均: {np.mean(mae_values):.3f}')
+    ax1.set_ylabel('MAE（元スケール）')
+    ax1.set_title('各FoldのMAE')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    
+    # Correlation
+    bars2 = ax2.bar(folds, corr_values, color=colors_list)
+    ax2.axhline(y=np.mean(corr_values), color='r', linestyle='--', 
+                label=f'平均: {np.mean(corr_values):.3f}')
+    ax2.set_ylabel('相関係数')
+    ax2.set_title('各Foldの相関係数')
+    ax2.set_ylim([0, 1])
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(save_dir / 'fold_performance_comparison.png', dpi=150, bbox_inches='tight')
+    plt.close()
+
+# ================================
+# プロット関数（Within-Subject用）- 元スケール表示版
+# ================================
+def plot_fold_results_colored(result, save_dir, config):
+    """各Foldの結果をプロット（色分け対応・元スケール表示）"""
+    fold = result['fold']
+    test_task = result['test_task']
+    task_color = config.task_colors[test_task]
+    
+    # テストデータは常に元スケールで表示
+    if 'test_predictions_denorm' in result:
+        test_preds_flat = result['test_predictions_denorm'].flatten()
+        test_targets_flat = result['test_targets_denorm'].flatten()
+        mae_value = result['test_mae_original']
+    else:
+        test_preds_flat = result['test_predictions'].flatten()
+        test_targets_flat = result['test_targets'].flatten()
+        mae_value = result['test_mae']
+    
+    # 訓練データ散布図（訓練データも元スケールに変換して表示）
+    if result['train_predictions'] is not None and result['train_targets'] is not None:
+        plt.figure(figsize=(10, 8))
+        
+        # 訓練データを元スケールに変換（可能な場合）
+        if config.normalize_signal and hasattr(config, 'normalization_method'):
+            # 注: 訓練データの逆変換には統計量が必要
+            train_preds_flat = result['train_predictions'].flatten()
+            train_targets_flat = result['train_targets'].flatten()
+        else:
+            train_preds_flat = result['train_predictions'].flatten()
+            train_targets_flat = result['train_targets'].flatten()
+        
+        plt.scatter(train_targets_flat, train_preds_flat, 
+                    alpha=0.5, s=10, color='gray', label='訓練データ')
+        min_val = min(train_targets_flat.min(), train_preds_flat.min())
+        max_val = max(train_targets_flat.max(), train_preds_flat.max())
+        plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2)
+        plt.xlabel('真値')
+        plt.ylabel('予測値')
+        plt.title(f"Fold {fold} 訓練データ - MAE: {result['train_mae']:.3f}, Corr: {result['train_corr']:.3f}")
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(save_dir / f'fold{fold}_train_scatter.png', dpi=150, bbox_inches='tight')
+        plt.close()
+    
+    # テストデータ散布図（色分け・元スケール）
+    plt.figure(figsize=(10, 8))
+    plt.scatter(test_targets_flat, test_preds_flat, 
+                alpha=0.6, s=20, color=task_color, label=f'テストタスク: {test_task}')
+    min_val = min(test_targets_flat.min(), test_preds_flat.min())
+    max_val = max(test_targets_flat.max(), test_preds_flat.max())
+    plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2)
+    plt.xlabel('真値（元スケール）')
+    plt.ylabel('予測値（元スケール）')
+    plt.title(f"Fold {fold} テストデータ ({test_task}) - MAE: {mae_value:.3f}, Corr: {result['test_corr']:.3f}")
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(save_dir / f'fold{fold}_test_scatter.png', dpi=150, bbox_inches='tight')
+    plt.close()
+
+def plot_subject_summary_colored(fold_results, all_test_predictions, all_test_targets, 
+                                all_test_tasks, subject, subject_save_dir, config):
+    """被験者の全体結果をプロット（タスクごとに色分け・元スケール表示）"""
+    
+    # 注：all_test_predictions, all_test_targetsは既に元スケール（denormalized）になっている
+    
+    # 全訓練データ統合（訓練データの元スケール変換は省略）
+    all_train_predictions = []
+    all_train_targets = []
+    for r in fold_results:
+        if r['train_predictions'] is not None and r['train_targets'] is not None:
+            all_train_predictions.append(r['train_predictions'].flatten())
+            all_train_targets.append(r['train_targets'].flatten())
+    
+    if all_train_predictions:
+        all_train_predictions = np.concatenate(all_train_predictions)
+        all_train_targets = np.concatenate(all_train_targets)
+        all_train_mae = mean_absolute_error(all_train_targets, all_train_predictions)
+        all_train_corr, _ = pearsonr(all_train_targets, all_train_predictions)
+    else:
+        all_train_mae = 0
+        all_train_corr = 0
+    
+    # 全テストデータメトリクス（元スケール）
+    all_test_mae = mean_absolute_error(all_test_targets, all_test_predictions)
+    all_test_corr, _ = pearsonr(all_test_targets, all_test_predictions)
+    
+    # 全訓練データ散布図
+    if all_train_predictions:
+        plt.figure(figsize=(10, 8))
+        plt.scatter(all_train_targets, all_train_predictions, alpha=0.5, s=10, color='gray')
+        min_val = min(all_train_targets.min(), all_train_predictions.min())
+        max_val = max(all_train_targets.max(), all_train_predictions.max())
+        plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2)
+        plt.xlabel('真値')
+        plt.ylabel('予測値')
+        plt.title(f"{subject} 全訓練データ - MAE: {all_train_mae:.3f}, Corr: {all_train_corr:.3f}")
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(subject_save_dir / 'all_train_scatter.png', dpi=150, bbox_inches='tight')
+        plt.close()
+    
+    # 全テストデータ散布図（タスクごとに色分け・元スケール）
+    plt.figure(figsize=(12, 8))
+    for task in config.tasks:
+        mask = all_test_tasks == task
+        if np.any(mask):
+            plt.scatter(all_test_targets[mask], all_test_predictions[mask], 
+                       alpha=0.6, s=20, color=config.task_colors[task], label=task)
+    
+    min_val = min(all_test_targets.min(), all_test_predictions.min())
+    max_val = max(all_test_targets.max(), all_test_predictions.max())
+    plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2)
+    plt.xlabel('真値（元スケール）')
+    plt.ylabel('予測値（元スケール）')
+    plt.title(f"{subject} 全テストデータ - MAE: {all_test_mae:.3f}, Corr: {all_test_corr:.3f}")
+    plt.legend(loc='upper left', bbox_to_anchor=(1.02, 1))
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(subject_save_dir / 'all_test_scatter_colored.png', dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    # 時系列プロット（オプション）
+    plt.figure(figsize=(15, 6))
+    time_points = np.arange(len(all_test_targets))
+    plt.plot(time_points, all_test_targets, 'b-', alpha=0.7, label='真値', linewidth=1)
+    plt.plot(time_points, all_test_predictions, 'r-', alpha=0.7, label='予測値', linewidth=1)
+    
+    # タスク境界に縦線を追加
+    for i in range(1, len(config.tasks)):
+        plt.axvline(x=i*config.task_duration, color='gray', linestyle='--', alpha=0.5)
+    
+    # タスク名を追加
+    for i, task in enumerate(config.tasks):
+        x_pos = i * config.task_duration + config.task_duration / 2
+        y_pos = plt.ylim()[1] * 0.95
+        plt.text(x_pos, y_pos, task, ha='center', va='top', fontsize=9)
+    
+    plt.xlabel('時間（フレーム）')
+    plt.ylabel('信号値（元スケール）')
+    plt.title(f"{subject} 時系列比較 - MAE: {all_test_mae:.3f}, Corr: {all_test_corr:.3f}")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(subject_save_dir / 'time_series_comparison.png', dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    return all_train_mae, all_train_corr, all_test_mae, all_test_corr
+
+def plot_all_subjects_summary_unified(all_subjects_results, config):
+    """全被験者のサマリープロット（1つのグラフに統合・元スケール）"""
+    save_dir = Path(config.save_path)
+    
+    # カラーマップを準備（32人の被験者用）
+    colors = plt.cm.hsv(np.linspace(0, 1, len(all_subjects_results)))
+    
+    # 被験者ごとのパフォーマンス比較（棒グラフ）
+    fig, axes = plt.subplots(3, 1, figsize=(16, 12))
+    
+    subjects = [r['subject'] for r in all_subjects_results]
+    train_maes = [r['train_mae'] for r in all_subjects_results]
+    test_maes = [r['test_mae'] for r in all_subjects_results]
+    test_corrs = [r['test_corr'] for r in all_subjects_results]
+    
+    x = np.arange(len(subjects))
+    
+    # 訓練MAE
+    bars1 = axes[0].bar(x, train_maes, color=colors)
+    avg_train_mae = np.mean(train_maes)
+    axes[0].axhline(y=avg_train_mae, color='r', linestyle='--', 
+                    label=f'平均: {avg_train_mae:.3f}')
+    axes[0].set_ylabel('MAE（元スケール）')
+    axes[0].set_title('訓練データMAE')
+    axes[0].legend()
+    axes[0].grid(True, alpha=0.3)
+    
+    # テストMAE
+    bars2 = axes[1].bar(x, test_maes, color=colors)
+    avg_test_mae = np.mean(test_maes)
+    axes[1].axhline(y=avg_test_mae, color='r', linestyle='--', 
+                    label=f'平均: {avg_test_mae:.3f}')
+    axes[1].set_ylabel('MAE（元スケール）')
+    axes[1].set_title('テストデータMAE')
+    axes[1].legend()
+    axes[1].grid(True, alpha=0.3)
+    
+    # テスト相関
+    bars3 = axes[2].bar(x, test_corrs, color=colors)
+    avg_test_corr = np.mean(test_corrs)
+    axes[2].axhline(y=avg_test_corr, color='r', linestyle='--', 
+                    label=f'平均: {avg_test_corr:.3f}')
+    axes[2].set_ylabel('相関係数')
+    axes[2].set_xlabel('被験者')
+    axes[2].set_title('テストデータ相関')
+    axes[2].set_xticks(x)
+    axes[2].set_xticklabels(subjects, rotation=45, ha='right')
+    axes[2].set_ylim([0, 1])
+    axes[2].legend()
+    axes[2].grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(save_dir / 'all_subjects_performance_comparison.png', dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    # 散布図: MAE vs 相関
+    plt.figure(figsize=(10, 8))
+    plt.scatter(test_maes, test_corrs, s=100, c=colors, alpha=0.6, edgecolors='black')
+    for i, subject in enumerate(subjects):
+        plt.annotate(subject, (test_maes[i], test_corrs[i]), fontsize=8,
+                    xytext=(5, 5), textcoords='offset points')
+    plt.xlabel('テストMAE（元スケール）')
+    plt.ylabel('テスト相関係数')
+    plt.title('被験者ごとのパフォーマンス分布')
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(save_dir / 'mae_vs_correlation_scatter.png', dpi=150, bbox_inches='tight')
+    plt.close()
