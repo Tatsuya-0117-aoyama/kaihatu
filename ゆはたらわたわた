@@ -1,0 +1,251 @@
+# ================================
+# 評価関数の修正（確実に元スケールに戻す）
+# ================================
+def evaluate_model(model, test_loader, config, normalization_stats=None):
+    """モデルの評価（元スケールに確実に戻す）"""
+    model.eval()
+    predictions = []
+    targets = []
+    
+    with torch.no_grad():
+        for rgb, sig in test_loader:
+            rgb, sig = rgb.to(config.device), sig.to(config.device)
+            
+            if config.use_amp:
+                with autocast():
+                    pred = model(rgb)
+            else:
+                pred = model(rgb)
+            
+            # 時系列全体を保存
+            predictions.append(pred.cpu().numpy())
+            targets.append(sig.cpu().numpy())
+    
+    predictions = np.concatenate(predictions, axis=0)  # (N, T)
+    targets = np.concatenate(targets, axis=0)  # (N, T)
+    
+    # 元のスケールに戻す
+    if config.normalize_signal and normalization_stats is not None:
+        predictions_denorm = denormalize_signal(predictions, normalization_stats, config.normalization_method)
+        targets_denorm = denormalize_signal(targets, normalization_stats, config.normalization_method)
+        
+        # 元スケールでのメトリクス計算
+        mae_original = mean_absolute_error(targets_denorm.flatten(), predictions_denorm.flatten())
+        rmse_original = np.sqrt(np.mean((targets_denorm.flatten() - predictions_denorm.flatten()) ** 2))
+        
+        # 正規化空間でのメトリクス（内部用）
+        mae_normalized = mean_absolute_error(targets.flatten(), predictions.flatten())
+        rmse_normalized = np.sqrt(np.mean((targets.flatten() - predictions.flatten()) ** 2))
+    else:
+        # 正規化していない場合は同じ
+        predictions_denorm = predictions
+        targets_denorm = targets
+        mae_original = mean_absolute_error(targets.flatten(), predictions.flatten())
+        rmse_original = np.sqrt(np.mean((targets.flatten() - predictions.flatten()) ** 2))
+        mae_normalized = mae_original
+        rmse_normalized = rmse_original
+    
+    # 相関係数は正規化の影響を受けない
+    corr, p_value = pearsonr(targets.flatten(), predictions.flatten())
+    
+    ss_res = np.sum((targets.flatten() - predictions.flatten()) ** 2)
+    ss_tot = np.sum((targets.flatten() - np.mean(targets.flatten())) ** 2)
+    r2 = 1 - (ss_res / ss_tot)
+    
+    return {
+        'mae': mae_normalized,  # 正規化空間でのMAE
+        'mae_original': mae_original,  # 元スケールでのMAE
+        'rmse': rmse_normalized,
+        'rmse_original': rmse_original,
+        'corr': corr,
+        'r2': r2,
+        'p_value': p_value,
+        'predictions': predictions,  # 正規化された予測
+        'targets': targets,  # 正規化されたターゲット
+        'predictions_denorm': predictions_denorm,  # 元スケールの予測
+        'targets_denorm': targets_denorm  # 元スケールのターゲット
+    }
+
+# ================================
+# Within-Subject交差検証の修正（元スケールを確実に返す）
+# ================================
+def task_cross_validation(rgb_data, signal_data, config, subject, subject_save_dir, subject_norm_stats):
+    """タスクごとの6分割交差検証（Within-Subject用）"""
+    
+    fold_results = []
+    all_test_predictions = []
+    all_test_targets = []
+    all_test_task_indices = []
+    all_test_tasks = []
+    
+    # 元の信号データを保存（正規化前）
+    if config.normalize_signal and subject_norm_stats:
+        signal_data_original = denormalize_signal(signal_data, subject_norm_stats, config.normalization_method)
+    else:
+        signal_data_original = signal_data.copy()
+    
+    np.random.seed(config.random_seed)
+    torch.manual_seed(config.random_seed)
+    
+    seed_worker = set_all_seeds(config.random_seed)
+    
+    import time
+    cv_start_time = time.time()
+    
+    for fold, test_task in enumerate(config.tasks):
+        fold_start_time = time.time()
+        
+        if config.verbose:
+            print(f"\n  Fold {fold+1}/6 - テストタスク: {test_task}")
+            print(f"    検証データ分割戦略: {config.validation_split_strategy}")
+        
+        train_rgb_list = []
+        train_signal_list = []
+        val_rgb_list = []
+        val_signal_list = []
+        test_rgb_list = []
+        test_signal_list = []
+        test_signal_original_list = []  # 元スケールのテスト信号
+        
+        for i, task in enumerate(config.tasks):
+            start_idx = i * config.task_duration
+            end_idx = (i + 1) * config.task_duration
+            
+            task_rgb = rgb_data[start_idx:end_idx]
+            task_signal = signal_data[start_idx:end_idx]
+            task_signal_original = signal_data_original[start_idx:end_idx]
+            
+            if task == test_task:
+                test_rgb_list.append(task_rgb)
+                test_signal_list.append(task_signal)
+                test_signal_original_list.append(task_signal_original)
+                all_test_task_indices.extend([i] * config.task_duration)
+                all_test_tasks.extend([test_task] * config.task_duration)
+            else:
+                if config.validation_split_strategy == 'stratified':
+                    train_rgb, train_signal, val_rgb, val_signal = stratified_sampling_split(
+                        task_rgb, task_signal,
+                        val_ratio=(1 - config.train_val_split_ratio),
+                        n_strata=config.n_strata,
+                        method=config.stratification_method
+                    )
+                    train_rgb_list.append(train_rgb)
+                    train_signal_list.append(train_signal)
+                    val_rgb_list.append(val_rgb)
+                    val_signal_list.append(val_signal)
+                else:
+                    val_size = int(config.task_duration * (1 - config.train_val_split_ratio))
+                    val_start_idx = config.task_duration - val_size
+                    
+                    train_rgb_list.append(task_rgb[:val_start_idx])
+                    train_signal_list.append(task_signal[:val_start_idx])
+                    val_rgb_list.append(task_rgb[val_start_idx:])
+                    val_signal_list.append(task_signal[val_start_idx:])
+        
+        train_rgb = np.concatenate(train_rgb_list)
+        train_signal = np.concatenate(train_signal_list)
+        val_rgb = np.concatenate(val_rgb_list)
+        val_signal = np.concatenate(val_signal_list)
+        test_rgb = np.concatenate(test_rgb_list)
+        test_signal = np.concatenate(test_signal_list)
+        test_signal_original = np.concatenate(test_signal_original_list)
+        
+        if config.verbose:
+            print(f"    データサイズ - 訓練: {len(train_rgb)}, 検証: {len(val_rgb)}, テスト: {len(test_rgb)}")
+            print(f"    訓練:検証 = {len(train_rgb)}:{len(val_rgb)} ≈ 9:1")
+        
+        # データローダー作成
+        train_dataset = CODataset(train_rgb[np.newaxis, ...], train_signal[np.newaxis, ...], 
+                                 config.model_type, config.use_channel, config, is_training=True,
+                                 normalization_stats=subject_norm_stats)
+        val_dataset = CODataset(val_rgb[np.newaxis, ...], val_signal[np.newaxis, ...], 
+                               config.model_type, config.use_channel, config, is_training=False,
+                               normalization_stats=subject_norm_stats)
+        test_dataset = CODataset(test_rgb[np.newaxis, ...], test_signal[np.newaxis, ...], 
+                                config.model_type, config.use_channel, config, is_training=False,
+                                normalization_stats=subject_norm_stats)
+        
+        train_loader = DataLoader(
+            train_dataset, batch_size=config.batch_size, shuffle=True,
+            num_workers=config.num_workers, worker_init_fn=seed_worker, 
+            pin_memory=config.pin_memory,
+            persistent_workers=config.persistent_workers if config.num_workers > 0 else False,
+            prefetch_factor=config.prefetch_factor if config.num_workers > 0 else None
+        )
+        
+        val_loader = DataLoader(
+            val_dataset, batch_size=config.batch_size, shuffle=False,
+            num_workers=config.num_workers, worker_init_fn=seed_worker,
+            pin_memory=config.pin_memory,
+            persistent_workers=config.persistent_workers if config.num_workers > 0 else False,
+            prefetch_factor=config.prefetch_factor if config.num_workers > 0 else None
+        )
+        
+        test_loader = DataLoader(
+            test_dataset, batch_size=config.batch_size, shuffle=False,
+            num_workers=config.num_workers, worker_init_fn=seed_worker,
+            pin_memory=config.pin_memory,
+            persistent_workers=config.persistent_workers if config.num_workers > 0 else False,
+            prefetch_factor=config.prefetch_factor if config.num_workers > 0 else None
+        )
+        
+        # モデル作成・学習
+        model = create_model(config)
+        model, train_preds, train_targets, _ = train_model(
+            model, train_loader, val_loader, config, fold, subject, normalization_stats=subject_norm_stats
+        )
+        
+        # 評価
+        test_results = evaluate_model(model, test_loader, config, subject_norm_stats)
+        
+        fold_time = time.time() - fold_start_time
+        
+        if config.verbose:
+            if train_preds is not None and train_targets is not None:
+                train_mae = mean_absolute_error(train_targets.flatten(), train_preds.flatten())
+                train_corr = np.corrcoef(train_targets.flatten(), train_preds.flatten())[0, 1]
+                print(f"    Train: MAE={train_mae:.4f}, Corr={train_corr:.4f}")
+            print(f"    Test:  MAE={test_results['mae']:.4f} (正規化空間)")
+            print(f"    Test:  MAE={test_results['mae_original']:.4f} (元スケール), Corr={test_results['corr']:.4f}")
+            print(f"    Fold処理時間: {fold_time:.1f}秒")
+        
+        # 結果保存（確実に元スケールのデータを保存）
+        fold_results.append({
+            'fold': fold + 1,
+            'test_task': test_task,
+            'train_predictions': train_preds,
+            'train_targets': train_targets,
+            'test_predictions': test_results['predictions'],
+            'test_targets': test_results['targets'],
+            'test_predictions_denorm': test_results['predictions_denorm'],  # 元スケール
+            'test_targets_denorm': test_results['targets_denorm'],  # 元スケール
+            'train_mae': mean_absolute_error(train_targets.flatten(), train_preds.flatten()) if train_preds is not None else None,
+            'train_corr': np.corrcoef(train_targets.flatten(), train_preds.flatten())[0, 1] if train_preds is not None else None,
+            'test_mae': test_results['mae'],
+            'test_mae_original': test_results['mae_original'],
+            'test_corr': test_results['corr']
+        })
+        
+        # 全体のテストデータ集約（元スケール）
+        all_test_predictions.extend(test_results['predictions_denorm'].flatten())
+        all_test_targets.extend(test_results['targets_denorm'].flatten())
+        
+        # 各Foldのプロット（元スケールデータを渡す）
+        plot_fold_results_colored(fold_results[-1], subject_save_dir, config)
+    
+    cv_total_time = time.time() - cv_start_time
+    if config.verbose:
+        print(f"\n  交差検証総処理時間: {cv_total_time:.1f}秒 ({cv_total_time/60:.1f}分)")
+    
+    # テスト予測を元の順序に並び替え
+    sorted_indices = np.argsort(all_test_task_indices)
+    all_test_predictions = np.array(all_test_predictions)[sorted_indices]
+    all_test_targets = np.array(all_test_targets)[sorted_indices]
+    all_test_tasks = np.array(all_test_tasks)[sorted_indices]
+    
+    # デバッグ出力
+    print(f"  最終出力データ範囲:")
+    print(f"    予測値: [{all_test_predictions.min():.3f}, {all_test_predictions.max():.3f}]")
+    print(f"    真値: [{all_test_targets.min():.3f}, {all_test_targets.max():.3f}]")
+    
+    return fold_results, all_test_predictions, all_test_targets, all_test_tasks
