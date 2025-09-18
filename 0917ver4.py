@@ -86,7 +86,7 @@ class Config:
         # ================================
         # LAB変換データ使用設定
         # ================================
-        self.use_lab = True  # LABデータを使用するか（True: RGB+LAB, False: RGBのみ）
+        self.use_lab =False   # LABデータを使用するか（True: RGB+LAB, False: RGBのみ）
         self.lab_filename = "_downsampled_1Hzver2.npy"  # LABデータのファイル名
         
         # ================================
