@@ -1,0 +1,395 @@
+# ================================
+# プロット関数（Cross-Subject用）- 元スケール信号値表示版
+# ================================
+def plot_fold_results_cross_subject(result, fold_dir, config):
+    """各Foldの結果をプロット（Cross-Subject用・元スケール信号値表示）"""
+    fold = result['fold']
+    
+    # 常に元スケールのデータを使用
+    if 'train_predictions_denorm' in result:
+        train_preds_flat = result['train_predictions_denorm'].flatten()
+        train_targets_flat = result['train_targets_denorm'].flatten()
+        test_preds_flat = result['test_predictions_denorm'].flatten()
+        test_targets_flat = result['test_targets_denorm'].flatten()
+    else:
+        train_preds_flat = result['train_predictions'].flatten()
+        train_targets_flat = result['train_targets'].flatten()
+        test_preds_flat = result['test_predictions'].flatten()
+        test_targets_flat = result['test_targets'].flatten()
+    
+    # 訓練データ散布図（元スケール信号値）
+    plt.figure(figsize=(10, 8))
+    plt.scatter(train_targets_flat, train_preds_flat, 
+                alpha=0.3, s=5, color='blue')
+    
+    # 対角線
+    min_val = min(train_targets_flat.min(), train_preds_flat.min())
+    max_val = max(train_targets_flat.max(), train_preds_flat.max())
+    plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2, label='理想線 (y=x)')
+    
+    # 統計情報を計算
+    mae = mean_absolute_error(train_targets_flat, train_preds_flat)
+    corr = np.corrcoef(train_targets_flat, train_preds_flat)[0, 1]
+    rmse = np.sqrt(np.mean((train_targets_flat - train_preds_flat) ** 2))
+    
+    plt.xlabel('信号真値', fontsize=12)
+    plt.ylabel('信号予測値', fontsize=12)
+    plt.title(f"Fold {fold} 訓練データ\nMAE={mae:.3f}, RMSE={rmse:.3f}, r={corr:.3f}", fontsize=14)
+    
+    # 統計情報をテキストボックスで表示
+    textstr = f'データ点数: {len(train_targets_flat):,}\n'
+    textstr += f'真値範囲: [{train_targets_flat.min():.2f}, {train_targets_flat.max():.2f}]\n'
+    textstr += f'予測範囲: [{train_preds_flat.min():.2f}, {train_preds_flat.max():.2f}]'
+    plt.text(0.02, 0.98, textstr, transform=plt.gca().transAxes,
+             fontsize=10, verticalalignment='top',
+             bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    
+    plt.grid(True, alpha=0.3)
+    plt.legend(loc='lower right')
+    plt.tight_layout()
+    plt.savefig(fold_dir / f'train_scatter.png', dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    # テストデータ散布図（元スケール信号値）
+    plt.figure(figsize=(10, 8))
+    plt.scatter(test_targets_flat, test_preds_flat, 
+                alpha=0.3, s=5, color=config.fold_colors[fold])
+    
+    min_val = min(test_targets_flat.min(), test_preds_flat.min())
+    max_val = max(test_targets_flat.max(), test_preds_flat.max())
+    plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2, label='理想線 (y=x)')
+    
+    # 統計情報を計算
+    mae = mean_absolute_error(test_targets_flat, test_preds_flat)
+    corr = np.corrcoef(test_targets_flat, test_preds_flat)[0, 1]
+    rmse = np.sqrt(np.mean((test_targets_flat - test_preds_flat) ** 2))
+    
+    plt.xlabel('信号真値', fontsize=12)
+    plt.ylabel('信号予測値', fontsize=12)
+    plt.title(f"Fold {fold} テストデータ\nMAE={mae:.3f}, RMSE={rmse:.3f}, r={corr:.3f}", fontsize=14)
+    
+    # 統計情報をテキストボックスで表示
+    textstr = f'データ点数: {len(test_targets_flat):,}\n'
+    textstr += f'真値範囲: [{test_targets_flat.min():.2f}, {test_targets_flat.max():.2f}]\n'
+    textstr += f'予測範囲: [{test_preds_flat.min():.2f}, {test_preds_flat.max():.2f}]'
+    plt.text(0.02, 0.98, textstr, transform=plt.gca().transAxes,
+             fontsize=10, verticalalignment='top',
+             bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    
+    plt.grid(True, alpha=0.3)
+    plt.legend(loc='lower right')
+    plt.tight_layout()
+    plt.savefig(fold_dir / f'test_scatter.png', dpi=150, bbox_inches='tight')
+    plt.close()
+
+def plot_all_folds_summary(fold_results, save_dir, config):
+    """全Foldの結果を統合してプロット（元スケール信号値表示）"""
+    
+    # 元スケールのデータを使用
+    if 'train_predictions_denorm' in fold_results[0]:
+        train_data_key = 'train_predictions_denorm'
+        train_target_key = 'train_targets_denorm'
+        test_data_key = 'test_predictions_denorm'
+        test_target_key = 'test_targets_denorm'
+    else:
+        train_data_key = 'train_predictions'
+        train_target_key = 'train_targets'
+        test_data_key = 'test_predictions'
+        test_target_key = 'test_targets'
+    
+    # 訓練データ統合プロット
+    plt.figure(figsize=(12, 10))
+    
+    # 各Foldのデータをプロット
+    for result in fold_results:
+        fold = result['fold']
+        train_preds_flat = result[train_data_key].flatten()
+        train_targets_flat = result[train_target_key].flatten()
+        
+        plt.scatter(train_targets_flat, train_preds_flat, 
+                   alpha=0.2, s=3, color=config.fold_colors[fold],
+                   label=f'Fold {fold}')
+    
+    # 全データの統計
+    all_train_targets = np.concatenate([r[train_target_key].flatten() for r in fold_results])
+    all_train_preds = np.concatenate([r[train_data_key].flatten() for r in fold_results])
+    
+    # 対角線
+    min_val = min(all_train_targets.min(), all_train_preds.min())
+    max_val = max(all_train_targets.max(), all_train_preds.max())
+    plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2, label='理想線 (y=x)')
+    
+    # 全体統計
+    overall_mae = mean_absolute_error(all_train_targets, all_train_preds)
+    overall_corr = np.corrcoef(all_train_targets, all_train_preds)[0, 1]
+    overall_rmse = np.sqrt(np.mean((all_train_targets - all_train_preds) ** 2))
+    
+    plt.xlabel('信号真値', fontsize=12)
+    plt.ylabel('信号予測値', fontsize=12)
+    plt.title(f'全Fold 訓練データ統合\nMAE={overall_mae:.3f}, RMSE={overall_rmse:.3f}, r={overall_corr:.3f}', fontsize=14)
+    
+    # 統計情報
+    textstr = f'総データ点数: {len(all_train_targets):,}\n'
+    textstr += f'真値範囲: [{all_train_targets.min():.2f}, {all_train_targets.max():.2f}]\n'
+    textstr += f'予測範囲: [{all_train_preds.min():.2f}, {all_train_preds.max():.2f}]'
+    plt.text(0.02, 0.98, textstr, transform=plt.gca().transAxes,
+             fontsize=10, verticalalignment='top',
+             bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    
+    plt.legend(loc='lower right', fontsize=9)
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(save_dir / 'all_folds_train_scatter.png', dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    # テストデータ統合プロット
+    plt.figure(figsize=(12, 10))
+    
+    for result in fold_results:
+        fold = result['fold']
+        test_preds_flat = result[test_data_key].flatten()
+        test_targets_flat = result[test_target_key].flatten()
+        
+        plt.scatter(test_targets_flat, test_preds_flat, 
+                   alpha=0.3, s=5, color=config.fold_colors[fold],
+                   label=f'Fold {fold}')
+    
+    # 全データの統計
+    all_test_targets = np.concatenate([r[test_target_key].flatten() for r in fold_results])
+    all_test_preds = np.concatenate([r[test_data_key].flatten() for r in fold_results])
+    
+    # 対角線
+    min_val = min(all_test_targets.min(), all_test_preds.min())
+    max_val = max(all_test_targets.max(), all_test_preds.max())
+    plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2, label='理想線 (y=x)')
+    
+    # 全体統計
+    overall_mae = mean_absolute_error(all_test_targets, all_test_preds)
+    overall_corr = np.corrcoef(all_test_targets, all_test_preds)[0, 1]
+    overall_rmse = np.sqrt(np.mean((all_test_targets - all_test_preds) ** 2))
+    
+    plt.xlabel('信号真値', fontsize=12)
+    plt.ylabel('信号予測値', fontsize=12)
+    plt.title(f'全Fold テストデータ統合\nMAE={overall_mae:.3f}, RMSE={overall_rmse:.3f}, r={overall_corr:.3f}', fontsize=14)
+    
+    # 統計情報
+    textstr = f'総データ点数: {len(all_test_targets):,}\n'
+    textstr += f'真値範囲: [{all_test_targets.min():.2f}, {all_test_targets.max():.2f}]\n'
+    textstr += f'予測範囲: [{all_test_preds.min():.2f}, {all_test_preds.max():.2f}]'
+    plt.text(0.02, 0.98, textstr, transform=plt.gca().transAxes,
+             fontsize=10, verticalalignment='top',
+             bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    
+    plt.legend(loc='lower right', fontsize=9)
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(save_dir / 'all_folds_test_scatter.png', dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    # 分布ヒストグラム
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    
+    # 訓練データの真値分布
+    axes[0, 0].hist(all_train_targets, bins=50, alpha=0.7, color='blue', edgecolor='black')
+    axes[0, 0].set_xlabel('信号値')
+    axes[0, 0].set_ylabel('頻度')
+    axes[0, 0].set_title(f'訓練データ真値分布\n平均={all_train_targets.mean():.3f}, 標準偏差={all_train_targets.std():.3f}')
+    axes[0, 0].grid(True, alpha=0.3)
+    
+    # 訓練データの予測値分布
+    axes[0, 1].hist(all_train_preds, bins=50, alpha=0.7, color='green', edgecolor='black')
+    axes[0, 1].set_xlabel('信号値')
+    axes[0, 1].set_ylabel('頻度')
+    axes[0, 1].set_title(f'訓練データ予測値分布\n平均={all_train_preds.mean():.3f}, 標準偏差={all_train_preds.std():.3f}')
+    axes[0, 1].grid(True, alpha=0.3)
+    
+    # テストデータの真値分布
+    axes[1, 0].hist(all_test_targets, bins=50, alpha=0.7, color='blue', edgecolor='black')
+    axes[1, 0].set_xlabel('信号値')
+    axes[1, 0].set_ylabel('頻度')
+    axes[1, 0].set_title(f'テストデータ真値分布\n平均={all_test_targets.mean():.3f}, 標準偏差={all_test_targets.std():.3f}')
+    axes[1, 0].grid(True, alpha=0.3)
+    
+    # テストデータの予測値分布
+    axes[1, 1].hist(all_test_preds, bins=50, alpha=0.7, color='green', edgecolor='black')
+    axes[1, 1].set_xlabel('信号値')
+    axes[1, 1].set_ylabel('頻度')
+    axes[1, 1].set_title(f'テストデータ予測値分布\n平均={all_test_preds.mean():.3f}, 標準偏差={all_test_preds.std():.3f}')
+    axes[1, 1].grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(save_dir / 'signal_distributions.png', dpi=150, bbox_inches='tight')
+    plt.close()
+
+# ================================
+# プロット関数（Within-Subject用）- 元スケール信号値表示版
+# ================================
+def plot_fold_results_colored(result, save_dir, config):
+    """各Foldの結果をプロット（色分け対応・元スケール信号値表示）"""
+    fold = result['fold']
+    test_task = result['test_task']
+    task_color = config.task_colors[test_task]
+    
+    # テストデータは常に元スケールで表示
+    if 'test_predictions_denorm' in result:
+        test_preds_flat = result['test_predictions_denorm'].flatten()
+        test_targets_flat = result['test_targets_denorm'].flatten()
+    else:
+        test_preds_flat = result['test_predictions'].flatten()
+        test_targets_flat = result['test_targets'].flatten()
+    
+    # テストデータ散布図（色分け・元スケール信号値）
+    plt.figure(figsize=(10, 8))
+    plt.scatter(test_targets_flat, test_preds_flat, 
+                alpha=0.6, s=20, color=task_color, label=f'テストタスク: {test_task}')
+    
+    # 対角線
+    min_val = min(test_targets_flat.min(), test_preds_flat.min())
+    max_val = max(test_targets_flat.max(), test_preds_flat.max())
+    plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2, label='理想線 (y=x)')
+    
+    # 統計情報を計算
+    mae = mean_absolute_error(test_targets_flat, test_preds_flat)
+    corr = np.corrcoef(test_targets_flat, test_preds_flat)[0, 1]
+    rmse = np.sqrt(np.mean((test_targets_flat - test_preds_flat) ** 2))
+    
+    plt.xlabel('信号真値', fontsize=12)
+    plt.ylabel('信号予測値', fontsize=12)
+    plt.title(f"Fold {fold} テストデータ ({test_task})\nMAE={mae:.3f}, RMSE={rmse:.3f}, r={corr:.3f}", fontsize=14)
+    
+    # 統計情報をテキストボックスで表示
+    textstr = f'データ点数: {len(test_targets_flat):,}\n'
+    textstr += f'真値範囲: [{test_targets_flat.min():.2f}, {test_targets_flat.max():.2f}]\n'
+    textstr += f'予測範囲: [{test_preds_flat.min():.2f}, {test_preds_flat.max():.2f}]'
+    plt.text(0.02, 0.98, textstr, transform=plt.gca().transAxes,
+             fontsize=10, verticalalignment='top',
+             bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    
+    plt.grid(True, alpha=0.3)
+    plt.legend(loc='lower right')
+    plt.tight_layout()
+    plt.savefig(save_dir / f'fold{fold}_test_scatter.png', dpi=150, bbox_inches='tight')
+    plt.close()
+
+def plot_subject_summary_colored(fold_results, all_test_predictions, all_test_targets, 
+                                all_test_tasks, subject, subject_save_dir, config):
+    """被験者の全体結果をプロット（タスクごとに色分け・元スケール信号値表示）"""
+    
+    # 全テストデータメトリクス（元スケール）
+    all_test_mae = mean_absolute_error(all_test_targets, all_test_predictions)
+    all_test_corr, _ = pearsonr(all_test_targets, all_test_predictions)
+    all_test_rmse = np.sqrt(np.mean((all_test_targets - all_test_predictions) ** 2))
+    
+    # 全テストデータ散布図（タスクごとに色分け・元スケール信号値）
+    plt.figure(figsize=(12, 10))
+    
+    for task in config.tasks:
+        mask = all_test_tasks == task
+        if np.any(mask):
+            plt.scatter(all_test_targets[mask], all_test_predictions[mask], 
+                       alpha=0.6, s=20, color=config.task_colors[task], label=task)
+    
+    # 対角線
+    min_val = min(all_test_targets.min(), all_test_predictions.min())
+    max_val = max(all_test_targets.max(), all_test_predictions.max())
+    plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2, label='理想線 (y=x)')
+    
+    plt.xlabel('信号真値', fontsize=12)
+    plt.ylabel('信号予測値', fontsize=12)
+    plt.title(f"{subject} 全テストデータ\nMAE={all_test_mae:.3f}, RMSE={all_test_rmse:.3f}, r={all_test_corr:.3f}", fontsize=14)
+    
+    # 統計情報をテキストボックスで表示
+    textstr = f'総データ点数: {len(all_test_targets):,}\n'
+    textstr += f'真値範囲: [{all_test_targets.min():.2f}, {all_test_targets.max():.2f}]\n'
+    textstr += f'予測範囲: [{all_test_predictions.min():.2f}, {all_test_predictions.max():.2f}]'
+    plt.text(0.02, 0.98, textstr, transform=plt.gca().transAxes,
+             fontsize=10, verticalalignment='top',
+             bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    
+    plt.legend(loc='lower right', bbox_to_anchor=(1.15, 0))
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(subject_save_dir / 'all_test_scatter_colored.png', dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    # 時系列プロット（元スケール信号値）
+    plt.figure(figsize=(16, 8))
+    
+    # 上段: 信号値の時系列
+    plt.subplot(2, 1, 1)
+    time_points = np.arange(len(all_test_targets))
+    plt.plot(time_points, all_test_targets, 'b-', alpha=0.7, label='真値', linewidth=1.5)
+    plt.plot(time_points, all_test_predictions, 'r-', alpha=0.7, label='予測値', linewidth=1)
+    
+    # タスク境界に縦線を追加
+    for i in range(1, len(config.tasks)):
+        plt.axvline(x=i*config.task_duration, color='gray', linestyle='--', alpha=0.5)
+    
+    # タスク名を追加
+    for i, task in enumerate(config.tasks):
+        x_pos = i * config.task_duration + config.task_duration / 2
+        y_pos = plt.ylim()[1] * 0.95
+        plt.text(x_pos, y_pos, task, ha='center', va='top', fontsize=9)
+    
+    plt.xlabel('時間（フレーム）', fontsize=11)
+    plt.ylabel('信号値', fontsize=11)
+    plt.title(f'時系列比較', fontsize=12)
+    plt.legend(loc='upper right')
+    plt.grid(True, alpha=0.3)
+    
+    # 下段: 予測誤差の時系列
+    plt.subplot(2, 1, 2)
+    errors = all_test_predictions - all_test_targets
+    plt.plot(time_points, errors, 'g-', alpha=0.7, linewidth=1)
+    plt.axhline(y=0, color='black', linestyle='-', alpha=0.3)
+    
+    # タスク境界に縦線を追加
+    for i in range(1, len(config.tasks)):
+        plt.axvline(x=i*config.task_duration, color='gray', linestyle='--', alpha=0.5)
+    
+    plt.xlabel('時間（フレーム）', fontsize=11)
+    plt.ylabel('予測誤差（予測値 - 真値）', fontsize=11)
+    plt.title(f'予測誤差の時系列（平均誤差={errors.mean():.3f}, 標準偏差={errors.std():.3f}）', fontsize=12)
+    plt.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(subject_save_dir / 'time_series_comparison.png', dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    # タスクごとの性能比較
+    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+    axes = axes.flatten()
+    
+    for idx, task in enumerate(config.tasks):
+        mask = all_test_tasks == task
+        if np.any(mask):
+            task_targets = all_test_targets[mask]
+            task_preds = all_test_predictions[mask]
+            
+            axes[idx].scatter(task_targets, task_preds, alpha=0.6, s=15, 
+                            color=config.task_colors[task])
+            
+            # 対角線
+            min_val = min(task_targets.min(), task_preds.min())
+            max_val = max(task_targets.max(), task_preds.max())
+            axes[idx].plot([min_val, max_val], [min_val, max_val], 'r--', lw=1.5)
+            
+            # 統計
+            mae = mean_absolute_error(task_targets, task_preds)
+            corr = np.corrcoef(task_targets, task_preds)[0, 1]
+            
+            axes[idx].set_xlabel('真値', fontsize=10)
+            axes[idx].set_ylabel('予測値', fontsize=10)
+            axes[idx].set_title(f'{task}\nMAE={mae:.3f}, r={corr:.3f}', fontsize=11)
+            axes[idx].grid(True, alpha=0.3)
+    
+    plt.suptitle(f'{subject} - タスク別性能比較', fontsize=14)
+    plt.tight_layout()
+    plt.savefig(subject_save_dir / 'task_wise_comparison.png', dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    # 訓練データのMAEとCorrを仮計算（訓練データの集計）
+    train_mae = np.mean([r['train_mae'] for r in fold_results if r['train_mae'] is not None])
+    train_corr = np.mean([r['train_corr'] for r in fold_results if r['train_corr'] is not None])
+    
+    return train_mae, train_corr, all_test_mae, all_test_corr
