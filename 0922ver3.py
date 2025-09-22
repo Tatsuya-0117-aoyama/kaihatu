@@ -2197,12 +2197,452 @@ def plot_fold_results_inter_subject(result, fold_dir, config):
     plt.title(f"Fold {fold} テストデータ - {config.target_signal}推定\n" +
              f"MAE: {result['test_mae']:.3f}, Corr: {result['test_corr']:.3f}\n" +
              f"テスト被験者: {test_subjects_str}\n" +
-    # plot_fold_results_inter_subject関数の続き
+             # plot_fold_results_inter_subject関数の続き
              f"キャリブレーション: y = {result['calibration_a']:.3f} * ŷ + {result['calibration_b']:.3f}")
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.savefig(fold_dir / f'test_scatter_{config.target_signal}_calibrated.png', dpi=150, bbox_inches='tight')
     plt.close()
+
+def plot_all_folds_summary_inter_subject(fold_results, save_dir, config):
+    """全Foldの結果を統合してプロット（Inter-Subject版）"""
+    
+    # 訓練データ統合プロット
+    plt.figure(figsize=(12, 10))
+    for result in fold_results:
+        fold = result['fold']
+        train_preds_flat = result['train_predictions'].flatten()
+        train_targets_flat = result['train_targets'].flatten()
+        
+        plt.scatter(train_targets_flat, train_preds_flat, 
+                   alpha=0.2, s=3, color=config.fold_colors[fold],
+                   label=f'Fold {fold}')
+    
+    # 全データの範囲で対角線
+    all_train_targets = np.concatenate([r['train_targets'].flatten() for r in fold_results])
+    all_train_preds = np.concatenate([r['train_predictions'].flatten() for r in fold_results])
+    min_val = min(all_train_targets.min(), all_train_preds.min())
+    max_val = max(all_train_targets.max(), all_train_preds.max())
+    plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2)
+    
+    plt.xlabel(f'真値 ({config.target_signal})')
+    plt.ylabel(f'予測値 ({config.target_signal})（キャリブレーション後）')
+    
+    avg_train_mae = np.mean([r['train_mae'] for r in fold_results])
+    avg_train_corr = np.mean([r['train_corr'] for r in fold_results])
+    plt.title(f'Inter-Subject 全Fold 訓練データ - {config.target_signal}推定\n' +
+             f'平均MAE: {avg_train_mae:.3f}, 平均Corr: {avg_train_corr:.3f}')
+    
+    plt.legend(loc='upper left')
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(save_dir / f'all_folds_train_scatter_{config.target_signal}_calibrated.png', dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    # テストデータ統合プロット
+    plt.figure(figsize=(12, 10))
+    for result in fold_results:
+        fold = result['fold']
+        test_preds_flat = result['test_predictions'].flatten()
+        test_targets_flat = result['test_targets'].flatten()
+        
+        plt.scatter(test_targets_flat, test_preds_flat, 
+                   alpha=0.3, s=5, color=config.fold_colors[fold],
+                   label=f'Fold {fold}')
+    
+    # 全データの範囲で対角線
+    all_test_targets = np.concatenate([r['test_targets'].flatten() for r in fold_results])
+    all_test_preds = np.concatenate([r['test_predictions'].flatten() for r in fold_results])
+    min_val = min(all_test_targets.min(), all_test_preds.min())
+    max_val = max(all_test_targets.max(), all_test_preds.max())
+    plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2)
+    
+    plt.xlabel(f'真値 ({config.target_signal})')
+    plt.ylabel(f'予測値 ({config.target_signal})（キャリブレーション後）')
+    
+    avg_test_mae = np.mean([r['test_mae'] for r in fold_results])
+    avg_test_corr = np.mean([r['test_corr'] for r in fold_results])
+    plt.title(f'Inter-Subject 全Fold テストデータ - {config.target_signal}推定\n' +
+             f'平均MAE: {avg_test_mae:.3f}, 平均Corr: {avg_test_corr:.3f}')
+    
+    plt.legend(loc='upper left')
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(save_dir / f'all_folds_test_scatter_{config.target_signal}_calibrated.png', dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    # パフォーマンス比較棒グラフ
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+    
+    folds = [f"Fold {r['fold']}" for r in fold_results]
+    mae_values = [r['test_mae'] for r in fold_results]
+    corr_values = [r['test_corr'] for r in fold_results]
+    colors_list = [config.fold_colors[i+1] for i in range(len(fold_results))]
+    
+    # MAE
+    bars1 = ax1.bar(folds, mae_values, color=colors_list)
+    ax1.axhline(y=np.mean(mae_values), color='r', linestyle='--', 
+                label=f'平均: {np.mean(mae_values):.3f}')
+    ax1.set_ylabel(f'MAE ({config.target_signal})')
+    ax1.set_title(f'Inter-Subject 各FoldのMAE - {config.target_signal}推定（キャリブレーション後）')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    
+    # Correlation
+    bars2 = ax2.bar(folds, corr_values, color=colors_list)
+    ax2.axhline(y=np.mean(corr_values), color='r', linestyle='--', 
+                label=f'平均: {np.mean(corr_values):.3f}')
+    ax2.set_ylabel('相関係数')
+    ax2.set_title(f'Inter-Subject 各Foldの相関係数 - {config.target_signal}推定（キャリブレーション後）')
+    ax2.set_ylim([0, 1])
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(save_dir / f'fold_performance_comparison_{config.target_signal}_calibrated.png', dpi=150, bbox_inches='tight')
+    plt.close()
+
+# ================================
+# Cross-Subject 5分割交差検証（スライディングウィンドウ対応）
+# ================================
+def cross_subject_cv(config):
+    """被験者間5分割交差検証（キャリブレーション版 + 被験者別波形プロット + スライディングウィンドウ対応）"""
+    
+    print(f"\n推定対象指標: {config.target_signal}")
+    if config.use_sliding_window:
+        print(f"スライディングウィンドウ: 有効（{config.window_size}秒ウィンドウ、ストライド{config.window_stride}秒）")
+    
+    # 全データ読み込み
+    all_rgb_data, all_signal_data, subject_task_info = load_all_subjects_data(config)
+    
+    n_samples = len(all_rgb_data)
+    
+    # データを順番に1,2,3,4,5,1,2,3,4,5...と振り分け
+    fold_indices = [[] for _ in range(config.n_folds)]
+    for i in range(n_samples):
+        fold_idx = i % config.n_folds  # 0,1,2,3,4,0,1,2,3,4,...
+        fold_indices[fold_idx].append(i)
+    
+    # 各foldのインデックスを配列に変換
+    for i in range(config.n_folds):
+        fold_indices[i] = np.array(fold_indices[i])
+    
+    # フォルダ構造作成
+    save_dir = Path(config.save_path)
+    save_dir.mkdir(parents=True, exist_ok=True)
+    
+    # データ分割情報を保存
+    split_info_file = save_dir / f'data_split_info_{config.target_signal}.txt'
+    with open(split_info_file, 'w', encoding='utf-8') as f:
+        f.write("="*60 + "\n")
+        f.write(f"Cross-Subject 5分割交差検証 データ分割情報 - {config.target_signal}推定\n")
+        f.write("分割方法: データ順に1,2,3,4,5,1,2,3,4,5...と振り分け\n")
+        f.write(f"推定対象指標: {config.target_signal}\n")
+        if config.use_sliding_window:
+            f.write(f"スライディングウィンドウ: {config.window_size}秒ウィンドウ、ストライド{config.window_stride}秒\n")
+        f.write(f"線形キャリブレーション: {'有効' if config.use_calibration else '無効'}\n")
+        f.write("="*60 + "\n\n")
+        f.write(f"総サンプル数: {n_samples}\n")
+        f.write(f"被験者数: {len(config.subjects)}\n")
+        f.write(f"タスク数/被験者: {len(config.tasks)}\n")
+        if config.use_sliding_window:
+            f.write(f"ウィンドウ数/タスク: {config.windows_per_task}\n")
+        f.write("\n")
+        
+        for fold_idx, test_idx in enumerate(fold_indices):
+            f.write(f"Fold {fold_idx + 1}:\n")
+            f.write(f"  テストサンプル数: {len(test_idx)}\n")
+            f.write(f"  テストインデックス（最初の10個）: {test_idx[:10].tolist()}...\n")
+            
+            # テストデータに含まれる被験者を確認
+            test_subjects = {}
+            for idx in test_idx:
+                subj = subject_task_info[idx]['subject']
+                task = subject_task_info[idx]['task']
+                if subj not in test_subjects:
+                    test_subjects[subj] = []
+                test_subjects[subj].append(task)
+            
+            f.write(f"  テストデータ被験者数: {len(test_subjects)}\n")
+            
+            # 被験者とタスクのカバレッジ確認
+            subjects_with_tasks = {}
+            for subj in test_subjects:
+                num_tasks = len(test_subjects[subj])
+                if num_tasks not in subjects_with_tasks:
+                    subjects_with_tasks[num_tasks] = []
+                subjects_with_tasks[num_tasks].append(subj)
+            
+            f.write(f"  タスク数別被験者分布:\n")
+            for num_tasks, subjects in sorted(subjects_with_tasks.items()):
+                f.write(f"    {num_tasks}タスク: {len(subjects)}被験者\n")
+            f.write("\n")
+    
+    print(f"\nデータ分割情報を保存: {split_info_file}")
+    
+    # 交差検証実行
+    fold_results = []
+    calibration_params_all = []
+    
+    # 被験者別の予測結果を保存するための辞書
+    subject_predictions_all = {}
+    subject_correlations = {}
+    
+    for fold_idx in range(config.n_folds):
+        print(f"\n{'='*60}")
+        print(f"Fold {fold_idx + 1}/{config.n_folds} - {config.target_signal}推定")
+        print(f"{'='*60}")
+        
+        # フォルダ作成
+        fold_dir = save_dir / f'fold{fold_idx + 1}'
+        fold_dir.mkdir(parents=True, exist_ok=True)
+        
+        # テストインデックス
+        test_idx = fold_indices[fold_idx]
+        
+        # 訓練インデックス（他の全fold）
+        train_idx = np.concatenate([fold_indices[i] for i in range(config.n_folds) if i != fold_idx])
+        
+        # データ分割
+        train_rgb = all_rgb_data[train_idx]
+        train_signal = all_signal_data[train_idx]
+        test_rgb = all_rgb_data[test_idx]
+        test_signal = all_signal_data[test_idx]
+        
+        # 訓練データから検証データを分離（10%）
+        val_size = int(len(train_rgb) * 0.1)
+        val_indices = np.random.choice(len(train_rgb), val_size, replace=False)
+        train_indices = np.setdiff1d(np.arange(len(train_rgb)), val_indices)
+        
+        val_rgb = train_rgb[val_indices]
+        val_signal = train_signal[val_indices]
+        train_rgb = train_rgb[train_indices]
+        train_signal = train_signal[train_indices]
+        
+        print(f"  データサイズ:")
+        if config.use_sliding_window:
+            print(f"    訓練: {len(train_rgb)}ウィンドウ")
+            print(f"    検証: {len(val_rgb)}ウィンドウ")
+            print(f"    テスト: {len(test_rgb)}ウィンドウ")
+        else:
+            print(f"    訓練: {len(train_rgb)}")
+            print(f"    検証: {len(val_rgb)}")
+            print(f"    テスト: {len(test_rgb)}")
+        
+        # 被験者カバレッジの確認
+        test_subjects_in_fold = set()
+        for idx in test_idx:
+            test_subjects_in_fold.add(subject_task_info[idx]['subject'])
+        print(f"  テストデータに含まれる被験者数: {len(test_subjects_in_fold)}")
+        
+        # データローダー作成
+        train_dataset = CODataset(train_rgb, train_signal, config.model_type, 
+                                 config.use_channel, config, is_training=True)
+        val_dataset = CODataset(val_rgb, val_signal, config.model_type, 
+                               config.use_channel, config, is_training=False)
+        test_dataset = CODataset(test_rgb, test_signal, config.model_type,
+                                config.use_channel, config, is_training=False)
+        
+        # DataLoader用のワーカー初期化関数
+        seed_worker = set_all_seeds(config.random_seed)
+        
+        train_loader = DataLoader(
+            train_dataset, batch_size=config.batch_size, shuffle=True,
+            num_workers=config.num_workers, pin_memory=config.pin_memory,
+            worker_init_fn=seed_worker,
+            persistent_workers=config.persistent_workers if config.num_workers > 0 else False,
+            prefetch_factor=config.prefetch_factor if config.num_workers > 0 else None
+        )
+        val_loader = DataLoader(
+            val_dataset, batch_size=config.batch_size, shuffle=False,
+            num_workers=config.num_workers, pin_memory=config.pin_memory,
+            worker_init_fn=seed_worker,
+            persistent_workers=config.persistent_workers if config.num_workers > 0 else False,
+            prefetch_factor=config.prefetch_factor if config.num_workers > 0 else None
+        )
+        test_loader = DataLoader(
+            test_dataset, batch_size=config.batch_size, shuffle=False,
+            num_workers=config.num_workers, pin_memory=config.pin_memory,
+            worker_init_fn=seed_worker,
+            persistent_workers=config.persistent_workers if config.num_workers > 0 else False,
+            prefetch_factor=config.prefetch_factor if config.num_workers > 0 else None
+        )
+        
+        # モデル作成・学習
+        model = create_model(config)
+        model, train_preds, train_targets, val_preds, val_targets = train_model(
+            model, train_loader, val_loader, config, fold=fold_idx
+        )
+        
+        # キャリブレーションパラメータの計算
+        if config.use_calibration and val_preds is not None and val_targets is not None:
+            a, b = compute_linear_calibration(val_preds, val_targets)
+            print(f"  キャリブレーションパラメータ: a={a:.4f}, b={b:.4f}")
+            calibration_params = (a, b)
+        else:
+            calibration_params = None
+        
+        # 評価（キャリブレーション適用）
+        train_results = evaluate_model(model, train_loader, config, calibration_params)
+        test_results = evaluate_model(model, test_loader, config, calibration_params)
+        
+        # テストデータの被験者別予測結果を整理
+        if config.use_sliding_window:
+            # スライディングウィンドウの場合の処理
+            for i, idx in enumerate(test_idx):
+                subject = subject_task_info[idx]['subject']
+                task = subject_task_info[idx]['task']
+                window_idx = subject_task_info[idx]['window']
+                task_idx = subject_task_info[idx]['task_idx']
+                
+                if subject not in subject_predictions_all:
+                    # 各被験者の全ウィンドウ分の配列を初期化
+                    total_windows = len(config.tasks) * config.windows_per_task
+                    subject_predictions_all[subject] = {
+                        'predictions': np.zeros(total_windows * config.window_size),
+                        'targets': np.zeros(total_windows * config.window_size),
+                        'fold_assigned': np.zeros(total_windows * config.window_size)
+                    }
+                
+                # グローバルなウィンドウインデックスを計算
+                global_window_idx = task_idx * config.windows_per_task + window_idx
+                start_idx = global_window_idx * config.window_size
+                end_idx = start_idx + config.window_size
+                
+                # 予測値と真値を適切な位置に配置
+                subject_predictions_all[subject]['predictions'][start_idx:end_idx] = test_results['predictions'][i]
+                subject_predictions_all[subject]['targets'][start_idx:end_idx] = test_results['targets'][i]
+                subject_predictions_all[subject]['fold_assigned'][start_idx:end_idx] = fold_idx + 1
+        else:
+            # 従来の処理
+            for i, idx in enumerate(test_idx):
+                subject = subject_task_info[idx]['subject']
+                task = subject_task_info[idx]['task']
+                task_idx = subject_task_info[idx]['task_idx']
+                
+                if subject not in subject_predictions_all:
+                    subject_predictions_all[subject] = {
+                        'predictions': np.zeros(360),
+                        'targets': np.zeros(360),
+                        'fold_assigned': np.zeros(360)
+                    }
+                
+                # タスクの開始・終了インデックスを計算
+                start_idx = task_idx * 60
+                end_idx = (task_idx + 1) * 60
+                
+                # 予測値と真値を適切な位置に配置
+                subject_predictions_all[subject]['predictions'][start_idx:end_idx] = test_results['predictions'][i]
+                subject_predictions_all[subject]['targets'][start_idx:end_idx] = test_results['targets'][i]
+                subject_predictions_all[subject]['fold_assigned'][start_idx:end_idx] = fold_idx + 1
+        
+        print(f"\n  Fold {fold_idx + 1} 結果 ({config.target_signal}):")
+        print(f"    訓練 - MAE: {train_results['mae']:.4f}, Corr: {train_results['corr']:.4f}")
+        print(f"    テスト - MAE: {test_results['mae']:.4f}, Corr: {test_results['corr']:.4f}")
+        
+        # 結果保存
+        fold_results.append({
+            'fold': fold_idx + 1,
+            'train_mae': train_results['mae'],
+            'train_corr': train_results['corr'],
+            'test_mae': test_results['mae'],
+            'test_corr': test_results['corr'],
+            'train_predictions': train_results['predictions'],
+            'train_targets': train_results['targets'],
+            'test_predictions': test_results['predictions'],
+            'test_targets': test_results['targets'],
+            'calibration_a': calibration_params[0] if calibration_params else 1.0,
+            'calibration_b': calibration_params[1] if calibration_params else 0.0
+        })
+        calibration_params_all.append(calibration_params)
+        
+        # Fold個別のプロット
+        plot_fold_results_cross_subject(fold_results[-1], fold_dir, config)
+    
+    # 被験者ごとの相関係数を計算
+    for subject, data in subject_predictions_all.items():
+        predictions = data['predictions']
+        targets = data['targets']
+        
+        # 相関係数を計算
+        if np.sum(data['fold_assigned']) > 0:  # データが存在する場合のみ
+            corr, _ = pearsonr(predictions, targets)
+            subject_correlations[subject] = corr
+            subject_predictions_all[subject]['correlation'] = corr
+    
+    # 被験者別波形プロット
+    subjects_dir = plot_subject_waveforms_sliding_window(subject_predictions_all, save_dir, config)
+    
+    # 相関係数ランキングを保存
+    save_correlation_ranking(subject_correlations, save_dir, config)
+    
+    # 全Fold統合プロット
+    plot_all_folds_summary_cross_subject(fold_results, save_dir, config)
+    
+    # 最終結果サマリー
+    avg_train_mae = np.mean([r['train_mae'] for r in fold_results])
+    avg_train_corr = np.mean([r['train_corr'] for r in fold_results])
+    avg_test_mae = np.mean([r['test_mae'] for r in fold_results])
+    avg_test_corr = np.mean([r['test_corr'] for r in fold_results])
+    
+    std_test_mae = np.std([r['test_mae'] for r in fold_results])
+    std_test_corr = np.std([r['test_corr'] for r in fold_results])
+    
+    print(f"\n{'='*60}")
+    print(f"5分割交差検証 最終結果 - {config.target_signal}推定（キャリブレーション適用後）")
+    print(f"{'='*60}")
+    print(f"訓練平均: MAE={avg_train_mae:.4f}, Corr={avg_train_corr:.4f}")
+    print(f"テスト平均: MAE={avg_test_mae:.4f}±{std_test_mae:.4f}, Corr={avg_test_corr:.4f}±{std_test_corr:.4f}")
+    
+    # 結果をCSVに保存（キャリブレーションパラメータも含む）
+    results_df = pd.DataFrame([{
+        'Fold': r['fold'],
+        'Target_Signal': config.target_signal,
+        'Train_MAE': r['train_mae'],
+        'Train_Corr': r['train_corr'],
+        'Test_MAE': r['test_mae'],
+        'Test_Corr': r['test_corr'],
+        'Calibration_a': r['calibration_a'],
+        'Calibration_b': r['calibration_b']
+    } for r in fold_results])
+    
+    # 平均と標準偏差を追加
+    mean_row = pd.DataFrame({
+        'Fold': ['Mean'],
+        'Target_Signal': [config.target_signal],
+        'Train_MAE': [avg_train_mae],
+        'Train_Corr': [avg_train_corr],
+        'Test_MAE': [avg_test_mae],
+        'Test_Corr': [avg_test_corr],
+        'Calibration_a': [np.mean([r['calibration_a'] for r in fold_results])],
+        'Calibration_b': [np.mean([r['calibration_b'] for r in fold_results])]
+    })
+    
+    std_row = pd.DataFrame({
+        'Fold': ['Std'],
+        'Target_Signal': [config.target_signal],
+        'Train_MAE': [np.std([r['train_mae'] for r in fold_results])],
+        'Train_Corr': [np.std([r['train_corr'] for r in fold_results])],
+        'Test_MAE': [std_test_mae],
+        'Test_Corr': [std_test_corr],
+        'Calibration_a': [np.std([r['calibration_a'] for r in fold_results])],
+        'Calibration_b': [np.std([r['calibration_b'] for r in fold_results])]
+    })
+    
+    results_df = pd.concat([results_df, mean_row, std_row], ignore_index=True)
+    results_df.to_csv(save_dir / f'cross_validation_results_{config.target_signal}_calibrated.csv', index=False)
+    
+    # 被験者別結果もCSVに保存
+    subject_results_df = pd.DataFrame([{
+        'Subject': subject,
+        'Target_Signal': config.target_signal,
+        'Correlation': corr
+    } for subject, corr in sorted(subject_correlations.items(), 
+                                 key=lambda x: x[1], reverse=True)])
+    
+    subject_results_df.to_csv(subjects_dir / f'subject_correlations_{config.target_signal}.csv', index=False)
+    
+    return fold_results
 
 # ================================
 # Within-Subject 6分割交差検証（スライディングウィンドウ対応）
@@ -2956,446 +3396,6 @@ def within_subject_analysis(config):
         }
     
     return None, None
-
-def plot_all_folds_summary_inter_subject(fold_results, save_dir, config):
-    """全Foldの結果を統合してプロット（Inter-Subject版）"""
-    
-    # 訓練データ統合プロット
-    plt.figure(figsize=(12, 10))
-    for result in fold_results:
-        fold = result['fold']
-        train_preds_flat = result['train_predictions'].flatten()
-        train_targets_flat = result['train_targets'].flatten()
-        
-        plt.scatter(train_targets_flat, train_preds_flat, 
-                   alpha=0.2, s=3, color=config.fold_colors[fold],
-                   label=f'Fold {fold}')
-    
-    # 全データの範囲で対角線
-    all_train_targets = np.concatenate([r['train_targets'].flatten() for r in fold_results])
-    all_train_preds = np.concatenate([r['train_predictions'].flatten() for r in fold_results])
-    min_val = min(all_train_targets.min(), all_train_preds.min())
-    max_val = max(all_train_targets.max(), all_train_preds.max())
-    plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2)
-    
-    plt.xlabel(f'真値 ({config.target_signal})')
-    plt.ylabel(f'予測値 ({config.target_signal})（キャリブレーション後）')
-    
-    avg_train_mae = np.mean([r['train_mae'] for r in fold_results])
-    avg_train_corr = np.mean([r['train_corr'] for r in fold_results])
-    plt.title(f'Inter-Subject 全Fold 訓練データ - {config.target_signal}推定\n' +
-             f'平均MAE: {avg_train_mae:.3f}, 平均Corr: {avg_train_corr:.3f}')
-    
-    plt.legend(loc='upper left')
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(save_dir / f'all_folds_train_scatter_{config.target_signal}_calibrated.png', dpi=150, bbox_inches='tight')
-    plt.close()
-    
-    # テストデータ統合プロット
-    plt.figure(figsize=(12, 10))
-    for result in fold_results:
-        fold = result['fold']
-        test_preds_flat = result['test_predictions'].flatten()
-        test_targets_flat = result['test_targets'].flatten()
-        
-        plt.scatter(test_targets_flat, test_preds_flat, 
-                   alpha=0.3, s=5, color=config.fold_colors[fold],
-                   label=f'Fold {fold}')
-    
-    # 全データの範囲で対角線
-    all_test_targets = np.concatenate([r['test_targets'].flatten() for r in fold_results])
-    all_test_preds = np.concatenate([r['test_predictions'].flatten() for r in fold_results])
-    min_val = min(all_test_targets.min(), all_test_preds.min())
-    max_val = max(all_test_targets.max(), all_test_preds.max())
-    plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2)
-    
-    plt.xlabel(f'真値 ({config.target_signal})')
-    plt.ylabel(f'予測値 ({config.target_signal})（キャリブレーション後）')
-    
-    avg_test_mae = np.mean([r['test_mae'] for r in fold_results])
-    avg_test_corr = np.mean([r['test_corr'] for r in fold_results])
-    plt.title(f'Inter-Subject 全Fold テストデータ - {config.target_signal}推定\n' +
-             f'平均MAE: {avg_test_mae:.3f}, 平均Corr: {avg_test_corr:.3f}')
-    
-    plt.legend(loc='upper left')
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(save_dir / f'all_folds_test_scatter_{config.target_signal}_calibrated.png', dpi=150, bbox_inches='tight')
-    plt.close()
-    
-    # パフォーマンス比較棒グラフ
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
-    
-    folds = [f"Fold {r['fold']}" for r in fold_results]
-    mae_values = [r['test_mae'] for r in fold_results]
-    corr_values = [r['test_corr'] for r in fold_results]
-    colors_list = [config.fold_colors[i+1] for i in range(len(fold_results))]
-    
-    # MAE
-    bars1 = ax1.bar(folds, mae_values, color=colors_list)
-    ax1.axhline(y=np.mean(mae_values), color='r', linestyle='--', 
-                label=f'平均: {np.mean(mae_values):.3f}')
-    ax1.set_ylabel(f'MAE ({config.target_signal})')
-    ax1.set_title(f'Inter-Subject 各FoldのMAE - {config.target_signal}推定（キャリブレーション後）')
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
-    
-    # Correlation
-    bars2 = ax2.bar(folds, corr_values, color=colors_list)
-    ax2.axhline(y=np.mean(corr_values), color='r', linestyle='--', 
-                label=f'平均: {np.mean(corr_values):.3f}')
-    ax2.set_ylabel('相関係数')
-    ax2.set_title(f'Inter-Subject 各Foldの相関係数 - {config.target_signal}推定（キャリブレーション後）')
-    ax2.set_ylim([0, 1])
-    ax2.legend()
-    ax2.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    plt.savefig(save_dir / f'fold_performance_comparison_{config.target_signal}_calibrated.png', dpi=150, bbox_inches='tight')
-    plt.close()
-
-# ================================
-# Cross-Subject 5分割交差検証（スライディングウィンドウ対応）
-# ================================
-def cross_subject_cv(config):
-    """被験者間5分割交差検証（キャリブレーション版 + 被験者別波形プロット + スライディングウィンドウ対応）"""
-    
-    print(f"\n推定対象指標: {config.target_signal}")
-    if config.use_sliding_window:
-        print(f"スライディングウィンドウ: 有効（{config.window_size}秒ウィンドウ、ストライド{config.window_stride}秒）")
-    
-    # 全データ読み込み
-    all_rgb_data, all_signal_data, subject_task_info = load_all_subjects_data(config)
-    
-    n_samples = len(all_rgb_data)
-    
-    # データを順番に1,2,3,4,5,1,2,3,4,5...と振り分け
-    fold_indices = [[] for _ in range(config.n_folds)]
-    for i in range(n_samples):
-        fold_idx = i % config.n_folds  # 0,1,2,3,4,0,1,2,3,4,...
-        fold_indices[fold_idx].append(i)
-    
-    # 各foldのインデックスを配列に変換
-    for i in range(config.n_folds):
-        fold_indices[i] = np.array(fold_indices[i])
-    
-    # フォルダ構造作成
-    save_dir = Path(config.save_path)
-    save_dir.mkdir(parents=True, exist_ok=True)
-    
-    # データ分割情報を保存
-    split_info_file = save_dir / f'data_split_info_{config.target_signal}.txt'
-    with open(split_info_file, 'w', encoding='utf-8') as f:
-        f.write("="*60 + "\n")
-        f.write(f"Cross-Subject 5分割交差検証 データ分割情報 - {config.target_signal}推定\n")
-        f.write("分割方法: データ順に1,2,3,4,5,1,2,3,4,5...と振り分け\n")
-        f.write(f"推定対象指標: {config.target_signal}\n")
-        if config.use_sliding_window:
-            f.write(f"スライディングウィンドウ: {config.window_size}秒ウィンドウ、ストライド{config.window_stride}秒\n")
-        f.write(f"線形キャリブレーション: {'有効' if config.use_calibration else '無効'}\n")
-        f.write("="*60 + "\n\n")
-        f.write(f"総サンプル数: {n_samples}\n")
-        f.write(f"被験者数: {len(config.subjects)}\n")
-        f.write(f"タスク数/被験者: {len(config.tasks)}\n")
-        if config.use_sliding_window:
-            f.write(f"ウィンドウ数/タスク: {config.windows_per_task}\n")
-        f.write("\n")
-        
-        for fold_idx, test_idx in enumerate(fold_indices):
-            f.write(f"Fold {fold_idx + 1}:\n")
-            f.write(f"  テストサンプル数: {len(test_idx)}\n")
-            f.write(f"  テストインデックス（最初の10個）: {test_idx[:10].tolist()}...\n")
-            
-            # テストデータに含まれる被験者を確認
-            test_subjects = {}
-            for idx in test_idx:
-                subj = subject_task_info[idx]['subject']
-                task = subject_task_info[idx]['task']
-                if subj not in test_subjects:
-                    test_subjects[subj] = []
-                test_subjects[subj].append(task)
-            
-            f.write(f"  テストデータ被験者数: {len(test_subjects)}\n")
-            
-            # 被験者とタスクのカバレッジ確認
-            subjects_with_tasks = {}
-            for subj in test_subjects:
-                num_tasks = len(test_subjects[subj])
-                if num_tasks not in subjects_with_tasks:
-                    subjects_with_tasks[num_tasks] = []
-                subjects_with_tasks[num_tasks].append(subj)
-            
-            f.write(f"  タスク数別被験者分布:\n")
-            for num_tasks, subjects in sorted(subjects_with_tasks.items()):
-                f.write(f"    {num_tasks}タスク: {len(subjects)}被験者\n")
-            f.write("\n")
-    
-    print(f"\nデータ分割情報を保存: {split_info_file}")
-    
-    # 交差検証実行
-    fold_results = []
-    calibration_params_all = []
-    
-    # 被験者別の予測結果を保存するための辞書
-    subject_predictions_all = {}
-    subject_correlations = {}
-    
-    for fold_idx in range(config.n_folds):
-        print(f"\n{'='*60}")
-        print(f"Fold {fold_idx + 1}/{config.n_folds} - {config.target_signal}推定")
-        print(f"{'='*60}")
-        
-        # フォルダ作成
-        fold_dir = save_dir / f'fold{fold_idx + 1}'
-        fold_dir.mkdir(parents=True, exist_ok=True)
-        
-        # テストインデックス
-        test_idx = fold_indices[fold_idx]
-        
-        # 訓練インデックス（他の全fold）
-        train_idx = np.concatenate([fold_indices[i] for i in range(config.n_folds) if i != fold_idx])
-        
-        # データ分割
-        train_rgb = all_rgb_data[train_idx]
-        train_signal = all_signal_data[train_idx]
-        test_rgb = all_rgb_data[test_idx]
-        test_signal = all_signal_data[test_idx]
-        
-        # 訓練データから検証データを分離（10%）
-        val_size = int(len(train_rgb) * 0.1)
-        val_indices = np.random.choice(len(train_rgb), val_size, replace=False)
-        train_indices = np.setdiff1d(np.arange(len(train_rgb)), val_indices)
-        
-        val_rgb = train_rgb[val_indices]
-        val_signal = train_signal[val_indices]
-        train_rgb = train_rgb[train_indices]
-        train_signal = train_signal[train_indices]
-        
-        print(f"  データサイズ:")
-        if config.use_sliding_window:
-            print(f"    訓練: {len(train_rgb)}ウィンドウ")
-            print(f"    検証: {len(val_rgb)}ウィンドウ")
-            print(f"    テスト: {len(test_rgb)}ウィンドウ")
-        else:
-            print(f"    訓練: {len(train_rgb)}")
-            print(f"    検証: {len(val_rgb)}")
-            print(f"    テスト: {len(test_rgb)}")
-        
-        # 被験者カバレッジの確認
-        test_subjects_in_fold = set()
-        for idx in test_idx:
-            test_subjects_in_fold.add(subject_task_info[idx]['subject'])
-        print(f"  テストデータに含まれる被験者数: {len(test_subjects_in_fold)}")
-        
-        # データローダー作成
-        train_dataset = CODataset(train_rgb, train_signal, config.model_type, 
-                                 config.use_channel, config, is_training=True)
-        val_dataset = CODataset(val_rgb, val_signal, config.model_type, 
-                               config.use_channel, config, is_training=False)
-        test_dataset = CODataset(test_rgb, test_signal, config.model_type,
-                                config.use_channel, config, is_training=False)
-        
-        # DataLoader用のワーカー初期化関数
-        seed_worker = set_all_seeds(config.random_seed)
-        
-        train_loader = DataLoader(
-            train_dataset, batch_size=config.batch_size, shuffle=True,
-            num_workers=config.num_workers, pin_memory=config.pin_memory,
-            worker_init_fn=seed_worker,
-            persistent_workers=config.persistent_workers if config.num_workers > 0 else False,
-            prefetch_factor=config.prefetch_factor if config.num_workers > 0 else None
-        )
-        val_loader = DataLoader(
-            val_dataset, batch_size=config.batch_size, shuffle=False,
-            num_workers=config.num_workers, pin_memory=config.pin_memory,
-            worker_init_fn=seed_worker,
-            persistent_workers=config.persistent_workers if config.num_workers > 0 else False,
-            prefetch_factor=config.prefetch_factor if config.num_workers > 0 else None
-        )
-        test_loader = DataLoader(
-            test_dataset, batch_size=config.batch_size, shuffle=False,
-            num_workers=config.num_workers, pin_memory=config.pin_memory,
-            worker_init_fn=seed_worker,
-            persistent_workers=config.persistent_workers if config.num_workers > 0 else False,
-            prefetch_factor=config.prefetch_factor if config.num_workers > 0 else None
-        )
-        
-        # モデル作成・学習
-        model = create_model(config)
-        model, train_preds, train_targets, val_preds, val_targets = train_model(
-            model, train_loader, val_loader, config, fold=fold_idx
-        )
-        
-        # キャリブレーションパラメータの計算
-        if config.use_calibration and val_preds is not None and val_targets is not None:
-            a, b = compute_linear_calibration(val_preds, val_targets)
-            print(f"  キャリブレーションパラメータ: a={a:.4f}, b={b:.4f}")
-            calibration_params = (a, b)
-        else:
-            calibration_params = None
-        
-        # 評価（キャリブレーション適用）
-        train_results = evaluate_model(model, train_loader, config, calibration_params)
-        test_results = evaluate_model(model, test_loader, config, calibration_params)
-        
-        # テストデータの被験者別予測結果を整理
-        if config.use_sliding_window:
-            # スライディングウィンドウの場合の処理
-            for i, idx in enumerate(test_idx):
-                subject = subject_task_info[idx]['subject']
-                task = subject_task_info[idx]['task']
-                window_idx = subject_task_info[idx]['window']
-                task_idx = subject_task_info[idx]['task_idx']
-                
-                if subject not in subject_predictions_all:
-                    # 各被験者の全ウィンドウ分の配列を初期化
-                    total_windows = len(config.tasks) * config.windows_per_task
-                    subject_predictions_all[subject] = {
-                        'predictions': np.zeros(total_windows * config.window_size),
-                        'targets': np.zeros(total_windows * config.window_size),
-                        'fold_assigned': np.zeros(total_windows * config.window_size)
-                    }
-                
-                # グローバルなウィンドウインデックスを計算
-                global_window_idx = task_idx * config.windows_per_task + window_idx
-                start_idx = global_window_idx * config.window_size
-                end_idx = start_idx + config.window_size
-                
-                # 予測値と真値を適切な位置に配置
-                subject_predictions_all[subject]['predictions'][start_idx:end_idx] = test_results['predictions'][i]
-                subject_predictions_all[subject]['targets'][start_idx:end_idx] = test_results['targets'][i]
-                subject_predictions_all[subject]['fold_assigned'][start_idx:end_idx] = fold_idx + 1
-        else:
-            # 従来の処理
-            for i, idx in enumerate(test_idx):
-                subject = subject_task_info[idx]['subject']
-                task = subject_task_info[idx]['task']
-                task_idx = subject_task_info[idx]['task_idx']
-                
-                if subject not in subject_predictions_all:
-                    subject_predictions_all[subject] = {
-                        'predictions': np.zeros(360),
-                        'targets': np.zeros(360),
-                        'fold_assigned': np.zeros(360)
-                    }
-                
-                # タスクの開始・終了インデックスを計算
-                start_idx = task_idx * 60
-                end_idx = (task_idx + 1) * 60
-                
-                # 予測値と真値を適切な位置に配置
-                subject_predictions_all[subject]['predictions'][start_idx:end_idx] = test_results['predictions'][i]
-                subject_predictions_all[subject]['targets'][start_idx:end_idx] = test_results['targets'][i]
-                subject_predictions_all[subject]['fold_assigned'][start_idx:end_idx] = fold_idx + 1
-        
-        print(f"\n  Fold {fold_idx + 1} 結果 ({config.target_signal}):")
-        print(f"    訓練 - MAE: {train_results['mae']:.4f}, Corr: {train_results['corr']:.4f}")
-        print(f"    テスト - MAE: {test_results['mae']:.4f}, Corr: {test_results['corr']:.4f}")
-        
-        # 結果保存
-        fold_results.append({
-            'fold': fold_idx + 1,
-            'train_mae': train_results['mae'],
-            'train_corr': train_results['corr'],
-            'test_mae': test_results['mae'],
-            'test_corr': test_results['corr'],
-            'train_predictions': train_results['predictions'],
-            'train_targets': train_results['targets'],
-            'test_predictions': test_results['predictions'],
-            'test_targets': test_results['targets'],
-            'calibration_a': calibration_params[0] if calibration_params else 1.0,
-            'calibration_b': calibration_params[1] if calibration_params else 0.0
-        })
-        calibration_params_all.append(calibration_params)
-        
-        # Fold個別のプロット
-        plot_fold_results_cross_subject(fold_results[-1], fold_dir, config)
-    
-    # 被験者ごとの相関係数を計算
-    for subject, data in subject_predictions_all.items():
-        predictions = data['predictions']
-        targets = data['targets']
-        
-        # 相関係数を計算
-        if np.sum(data['fold_assigned']) > 0:  # データが存在する場合のみ
-            corr, _ = pearsonr(predictions, targets)
-            subject_correlations[subject] = corr
-            subject_predictions_all[subject]['correlation'] = corr
-    
-    # 被験者別波形プロット
-    subjects_dir = plot_subject_waveforms_sliding_window(subject_predictions_all, save_dir, config)
-    
-    # 相関係数ランキングを保存
-    save_correlation_ranking(subject_correlations, save_dir, config)
-    
-    # 全Fold統合プロット
-    plot_all_folds_summary_cross_subject(fold_results, save_dir, config)
-    
-    # 最終結果サマリー
-    avg_train_mae = np.mean([r['train_mae'] for r in fold_results])
-    avg_train_corr = np.mean([r['train_corr'] for r in fold_results])
-    avg_test_mae = np.mean([r['test_mae'] for r in fold_results])
-    avg_test_corr = np.mean([r['test_corr'] for r in fold_results])
-    
-    std_test_mae = np.std([r['test_mae'] for r in fold_results])
-    std_test_corr = np.std([r['test_corr'] for r in fold_results])
-    
-    print(f"\n{'='*60}")
-    print(f"5分割交差検証 最終結果 - {config.target_signal}推定（キャリブレーション適用後）")
-    print(f"{'='*60}")
-    print(f"訓練平均: MAE={avg_train_mae:.4f}, Corr={avg_train_corr:.4f}")
-    print(f"テスト平均: MAE={avg_test_mae:.4f}±{std_test_mae:.4f}, Corr={avg_test_corr:.4f}±{std_test_corr:.4f}")
-    
-    # 結果をCSVに保存（キャリブレーションパラメータも含む）
-    results_df = pd.DataFrame([{
-        'Fold': r['fold'],
-        'Target_Signal': config.target_signal,
-        'Train_MAE': r['train_mae'],
-        'Train_Corr': r['train_corr'],
-        'Test_MAE': r['test_mae'],
-        'Test_Corr': r['test_corr'],
-        'Calibration_a': r['calibration_a'],
-        'Calibration_b': r['calibration_b']
-    } for r in fold_results])
-    
-    # 平均と標準偏差を追加
-    mean_row = pd.DataFrame({
-        'Fold': ['Mean'],
-        'Target_Signal': [config.target_signal],
-        'Train_MAE': [avg_train_mae],
-        'Train_Corr': [avg_train_corr],
-        'Test_MAE': [avg_test_mae],
-        'Test_Corr': [avg_test_corr],
-        'Calibration_a': [np.mean([r['calibration_a'] for r in fold_results])],
-        'Calibration_b': [np.mean([r['calibration_b'] for r in fold_results])]
-    })
-    
-    std_row = pd.DataFrame({
-        'Fold': ['Std'],
-        'Target_Signal': [config.target_signal],
-        'Train_MAE': [np.std([r['train_mae'] for r in fold_results])],
-        'Train_Corr': [np.std([r['train_corr'] for r in fold_results])],
-        'Test_MAE': [std_test_mae],
-        'Test_Corr': [std_test_corr],
-        'Calibration_a': [np.std([r['calibration_a'] for r in fold_results])],
-        'Calibration_b': [np.std([r['calibration_b'] for r in fold_results])]
-    })
-    
-    results_df = pd.concat([results_df, mean_row, std_row], ignore_index=True)
-    results_df.to_csv(save_dir / f'cross_validation_results_{config.target_signal}_calibrated.csv', index=False)
-    
-    # 被験者別結果もCSVに保存
-    subject_results_df = pd.DataFrame([{
-        'Subject': subject,
-        'Target_Signal': config.target_signal,
-        'Correlation': corr
-    } for subject, corr in sorted(subject_correlations.items(), 
-                                 key=lambda x: x[1], reverse=True)])
-    
-    subject_results_df.to_csv(subjects_dir / f'subject_correlations_{config.target_signal}.csv', index=False)
-    
-    return fold_results
 
 # ================================
 # プロット関数（Cross-Subject用）
