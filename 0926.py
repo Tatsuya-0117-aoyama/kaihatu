@@ -2960,6 +2960,209 @@ def plot_all_folds_summary_cross_subject(fold_results, save_dir, config):
     plt.close()
 
 # ================================
+# Within-Subject用プロット関数（スライディングウィンドウ対応）
+# ================================
+def plot_fold_results_colored(result, save_dir, config):
+    """各Foldの結果をプロット（色分け対応、キャリブレーション版）"""
+    fold = result['fold']
+    test_task = result['test_task']
+    task_color = config.task_colors[test_task]
+    
+    # 訓練データ散布図
+    if result['train_predictions'] is not None and result['train_targets'] is not None:
+        plt.figure(figsize=(10, 8))
+        train_preds_flat = result['train_predictions'].flatten()
+        train_targets_flat = result['train_targets'].flatten()
+        plt.scatter(train_targets_flat, train_preds_flat,
+                    alpha=0.5, s=10, color='gray', label='訓練データ')
+        min_val = min(train_targets_flat.min(), train_preds_flat.min())
+        max_val = max(train_targets_flat.max(), train_preds_flat.max())
+        plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2)
+        plt.xlabel(f'真値 ({config.target_signal})')
+        plt.ylabel(f'予測値 ({config.target_signal})（キャリブレーション後）')
+        plt.title(f"Fold {fold} 訓練データ - {config.target_signal}推定\n" +
+                 f"MAE: {result['train_mae']:.3f}, Corr: {result['train_corr']:.3f}")
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(save_dir / f'fold{fold}_train_scatter_{config.target_signal}_calibrated.png', dpi=150, bbox_inches='tight')
+        plt.close()
+    
+    # テストデータ散布図（色分け）
+    plt.figure(figsize=(10, 8))
+    test_preds_flat = result['test_predictions'].flatten()
+    test_targets_flat = result['test_targets'].flatten()
+    plt.scatter(test_targets_flat, test_preds_flat,
+                alpha=0.6, s=20, color=task_color, label=f'テストタスク: {test_task}')
+    min_val = min(test_targets_flat.min(), test_preds_flat.min())
+    max_val = max(test_targets_flat.max(), test_preds_flat.max())
+    plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2)
+    plt.xlabel(f'真値 ({config.target_signal})')
+    plt.ylabel(f'予測値 ({config.target_signal})（キャリブレーション後）')
+    plt.title(f"Fold {fold} テスト ({test_task}) - {config.target_signal}推定\n" +
+             f"MAE: {result['test_mae']:.3f}, Corr: {result['test_corr']:.3f}\n" +
+             f"キャリブレーション: y = {result['calibration_a']:.3f} * ŷ + {result['calibration_b']:.3f}")
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(save_dir / f'fold{fold}_test_scatter_{config.target_signal}_calibrated.png', dpi=150, bbox_inches='tight')
+    plt.close()
+
+def plot_fold_results_colored_sliding_window(result, save_dir, config):
+    """各Foldの結果をプロット（スライディングウィンドウ版）"""
+    fold = result['fold']
+    test_task = result['test_task']
+    task_color = config.task_colors[test_task]
+    
+    # 訓練データ散布図
+    if result['train_predictions'] is not None and result['train_targets'] is not None:
+        plt.figure(figsize=(10, 8))
+        train_preds_flat = result['train_predictions'].flatten()
+        train_targets_flat = result['train_targets'].flatten()
+        plt.scatter(train_targets_flat, train_preds_flat,
+                    alpha=0.5, s=10, color='gray', label='訓練ウィンドウ')
+        min_val = min(train_targets_flat.min(), train_preds_flat.min())
+        max_val = max(train_targets_flat.max(), train_preds_flat.max())
+        plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2)
+        plt.xlabel(f'真値 ({config.target_signal})')
+        plt.ylabel(f'予測値 ({config.target_signal})（キャリブレーション後）')
+        plt.title(f"Fold {fold} 訓練データ - {config.target_signal}推定 (3秒ウィンドウ)\n" +
+                 f"MAE: {result['train_mae']:.3f}, Corr: {result['train_corr']:.3f}")
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(save_dir / f'fold{fold}_train_scatter_{config.target_signal}_sw_calibrated.png', dpi=150, bbox_inches='tight')
+        plt.close()
+    
+    # テストデータ散布図
+    plt.figure(figsize=(10, 8))
+    test_preds_flat = result['test_predictions'].flatten()
+    test_targets_flat = result['test_targets'].flatten()
+    plt.scatter(test_targets_flat, test_preds_flat,
+                alpha=0.6, s=20, color=task_color, label=f'テストタスク: {test_task} (3秒ウィンドウ)')
+    min_val = min(test_targets_flat.min(), test_preds_flat.min())
+    max_val = max(test_targets_flat.max(), test_preds_flat.max())
+    plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2)
+    plt.xlabel(f'真値 ({config.target_signal})')
+    plt.ylabel(f'予測値 ({config.target_signal})（キャリブレーション後）')
+    plt.title(f"Fold {fold} テスト ({test_task}) - {config.target_signal}推定 (3秒ウィンドウ)\n" +
+             f"MAE: {result['test_mae']:.3f}, Corr: {result['test_corr']:.3f}\n" +
+             f"キャリブレーション: y = {result['calibration_a']:.3f} * ŷ + {result['calibration_b']:.3f}")
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(save_dir / f'fold{fold}_test_scatter_{config.target_signal}_sw_calibrated.png', dpi=150, bbox_inches='tight')
+    plt.close()
+
+def plot_subject_summary_colored_sliding_window(fold_results, all_test_predictions, all_test_targets,
+                                                all_test_tasks, subject, subject_save_dir, config):
+    """被験者の全体結果をプロット（タスクごとに色分け、スライディングウィンドウ版）"""
+    
+    # 全訓練データ統合
+    all_train_predictions = []
+    all_train_targets = []
+    for r in fold_results:
+        if r['train_predictions'] is not None and r['train_targets'] is not None:
+            all_train_predictions.append(r['train_predictions'].flatten())
+            all_train_targets.append(r['train_targets'].flatten())
+    
+    if all_train_predictions:
+        all_train_predictions = np.concatenate(all_train_predictions)
+        all_train_targets = np.concatenate(all_train_targets)
+        all_train_mae = mean_absolute_error(all_train_targets, all_train_predictions)
+        all_train_corr, _ = pearsonr(all_train_targets, all_train_predictions)
+    else:
+        all_train_mae = 0
+        all_train_corr = 0
+    
+    # 全テストデータメトリクス
+    all_test_mae = mean_absolute_error(all_test_targets, all_test_predictions)
+    all_test_corr, _ = pearsonr(all_test_targets, all_test_predictions)
+    
+    # 全訓練データ散布図
+    if all_train_predictions:
+        plt.figure(figsize=(10, 8))
+        plt.scatter(all_train_targets, all_train_predictions, alpha=0.5, s=10, color='gray')
+        min_val = min(all_train_targets.min(), all_train_predictions.min())
+        max_val = max(all_train_targets.max(), all_train_predictions.max())
+        plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2)
+        plt.xlabel(f'真値 ({config.target_signal})')
+        plt.ylabel(f'予測値 ({config.target_signal})（キャリブレーション後）')
+        plt.title(f"{subject} 全訓練データ - {config.target_signal}推定 (3秒ウィンドウ)\n" +
+                 f"MAE: {all_train_mae:.3f}, Corr: {all_train_corr:.3f}")
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(subject_save_dir / f'all_train_scatter_{config.target_signal}_sw_calibrated.png', dpi=150, bbox_inches='tight')
+        plt.close()
+    
+    # 全テストデータ散布図（タスクごとに色分け）
+    plt.figure(figsize=(12, 8))
+    for task in config.tasks:
+        mask = all_test_tasks == task
+        if np.any(mask):
+            plt.scatter(all_test_targets[mask], all_test_predictions[mask],
+                       alpha=0.6, s=20, color=config.task_colors[task], label=task)
+    
+    min_val = min(all_test_targets.min(), all_test_predictions.min())
+    max_val = max(all_test_targets.max(), all_test_predictions.max())
+    plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2)
+    plt.xlabel(f'真値 ({config.target_signal})')
+    plt.ylabel(f'予測値 ({config.target_signal})（キャリブレーション後）')
+    plt.title(f"{subject} 全テストデータ - {config.target_signal}推定 (3秒ウィンドウ)\n" +
+             f"MAE: {all_test_mae:.3f}, Corr: {all_test_corr:.3f}")
+    plt.legend(loc='upper left', bbox_to_anchor=(1.02, 1))
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(subject_save_dir / f'all_test_scatter_colored_{config.target_signal}_sw_calibrated.png', dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    return all_train_mae, all_train_corr, all_test_mae, all_test_corr
+
+def plot_all_subjects_summary_unified(all_subjects_results, config):
+    """全被験者のサマリープロット（1つのグラフに統合、キャリブレーション版）"""
+    save_dir = Path(config.save_path)
+    
+    # カラーマップを準備（32人の被験者用）
+    colors = plt.cm.hsv(np.linspace(0, 1, len(all_subjects_results)))
+    
+    # 被験者ごとのパフォーマンス比較（棒グラフ）
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(16, 10))
+    
+    subjects = [r['subject'] for r in all_subjects_results]
+    train_corrs = [r['train_corr'] for r in all_subjects_results]
+    test_corrs = [r['test_corr'] for r in all_subjects_results]
+    
+    x = np.arange(len(subjects))
+    window_info = f" (3秒ウィンドウ)" if config.use_sliding_window else ""
+    
+    # 訓練相関
+    bars1 = ax1.bar(x, train_corrs, color=colors)
+    avg_train_corr = np.mean(train_corrs)
+    ax1.axhline(y=avg_train_corr, color='r', linestyle='--', label=f'平均: {avg_train_corr:.3f}')
+    ax1.set_ylabel('相関係数')
+    ax1.set_title(f'訓練データ相関 - {config.target_signal}推定{window_info}（キャリブレーション後）')
+    ax1.set_ylim([0, 1])
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    
+    # テスト相関
+    bars2 = ax2.bar(x, test_corrs, color=colors)
+    avg_test_corr = np.mean(test_corrs)
+    ax2.axhline(y=avg_test_corr, color='r', linestyle='--', label=f'平均: {avg_test_corr:.3f}')
+    ax2.set_ylabel('相関係数')
+    ax2.set_xlabel('被験者')
+    ax2.set_title(f'テストデータ相関 - {config.target_signal}推定{window_info}（キャリブレーション後）')
+    ax2.set_xticks(x)
+    ax2.set_xticklabels(subjects, rotation=45, ha='right')
+    ax2.set_ylim([0, 1])
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(save_dir / f'all_subjects_performance_comparison_{config.target_signal}_3sec_calibrated.png', dpi=150, bbox_inches='tight')
+    plt.close()
+
+# ================================
 # Within-Subject用プロット関数（元のバージョン - スライディングウィンドウなし）
 # ================================
 def plot_subject_summary_colored(fold_results, all_test_predictions, all_test_targets,
